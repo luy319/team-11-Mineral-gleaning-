@@ -1,16 +1,4 @@
-"""
-MINERAL GLEANING RIGHTS — Gold Pass Platform
-Team 11 | Track 1: Responsible Sourcing, Data & Traceability
 
-A working prototype that simulates the "Verify" and "Sell" stages of the
-Mineral Gleaning Rights model: dumps are registered with a geochemical
-reference profile, batches submitted by the cooperative are AI-scanned
-against that profile, mismatches go to officer review (not automatic
-rejection), and Ergo-side re-verification confirms the batch before
-same-day mobile-money payout.
-
-Run with:  streamlit run app.py
-"""
 
 import streamlit as st
 import pandas as pd
@@ -20,11 +8,11 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import uuid
 
-# --------------------------------------------------------------------------
+
 # PAGE CONFIG & THEME
-# --------------------------------------------------------------------------
+
 st.set_page_config(
-    page_title="Mineral Gleaning Rights — Gold Pass",
+    page_title="Mineral Gleaning Rights - Gold Pass",
     page_icon=None,
     layout="wide",
     initial_sidebar_state="expanded",
@@ -176,9 +164,8 @@ FEATURE_LABELS = {
 }
 FLAG_THRESHOLD = 2.75  # aggregate z-distance above which a batch goes to officer review
 
-# --------------------------------------------------------------------------
-# SEED DATA / SESSION STATE
-# --------------------------------------------------------------------------
+#  SESSION STATE
+
 
 def _rng_for(name):
     seed = abs(hash(name)) % (2**32)
@@ -335,9 +322,8 @@ def record_batch(dump_name, weight_kg, sample, when=None, silent=False):
 
 init_state()
 
-# --------------------------------------------------------------------------
 # SIDEBAR NAV
-# --------------------------------------------------------------------------
+
 st.sidebar.markdown("<div class='eyebrow'>Team 11 · Track 1</div>", unsafe_allow_html=True)
 st.sidebar.markdown("### Mineral Gleaning Rights")
 st.sidebar.caption("Gold Pass Platform · East Rand")
@@ -371,9 +357,8 @@ members = st.session_state.members
 
 MAP_STYLE = "carto-positron"
 
-# --------------------------------------------------------------------------
 # DASHBOARD
-# --------------------------------------------------------------------------
+
 if page == "Dashboard":
     st.markdown("<div class='eyebrow'>Site overview</div>", unsafe_allow_html=True)
     st.title("Mineral Gleaning Rights")
@@ -417,9 +402,8 @@ if page == "Dashboard":
     else:
         st.info("No batches yet — submit one from the Collection Point page.")
 
-# --------------------------------------------------------------------------
 # REGISTER A DUMP
-# --------------------------------------------------------------------------
+
 elif page == "Register a Dump":
     st.markdown("<div class='eyebrow'>Stage 01 · Register</div>", unsafe_allow_html=True)
     st.title("Register a Dump")
@@ -467,9 +451,9 @@ elif page == "Register a Dump":
             prof_df = pd.DataFrame(prof).T.rename(index=FEATURE_LABELS)
             st.dataframe(prof_df, use_container_width=True)
 
-# --------------------------------------------------------------------------
+
 # COOPERATIVE MEMBERS
-# --------------------------------------------------------------------------
+
 elif page == "Cooperative Members":
     st.markdown("<div class='eyebrow'>Cooperative roster</div>", unsafe_allow_html=True)
     st.title("Cooperative Members")
@@ -511,9 +495,9 @@ elif page == "Cooperative Members":
         else:
             st.info("No members registered yet.")
 
-# --------------------------------------------------------------------------
+
 # COLLECTION POINT — SCAN
-# --------------------------------------------------------------------------
+
 elif page == "Collection Point — Scan":
     st.markdown("<div class='eyebrow'>Stage 03 · Verify</div>", unsafe_allow_html=True)
     st.title("Collection Point")
@@ -575,9 +559,8 @@ elif page == "Collection Point — Scan":
             batch_id = record_batch(dump_choice, weight, sample)
             st.session_state["_last_scan"] = batch_id
 
-# --------------------------------------------------------------------------
 # OFFICER REVIEW QUEUE
-# --------------------------------------------------------------------------
+
 elif page == "Officer Review Queue":
     st.markdown("<div class='eyebrow'>Human-in-the-loop</div>", unsafe_allow_html=True)
     st.title("Officer Review Queue")
@@ -621,9 +604,9 @@ elif page == "Officer Review Queue":
                         st.session_state.batches.loc[idx, "officer_note"] = note or "Rejected after manual review."
                         st.rerun()
 
-# --------------------------------------------------------------------------
+
 # ERGO VERIFICATION & SALE
-# --------------------------------------------------------------------------
+
 elif page == "Ergo Verification & Sale":
     st.markdown("<div class='eyebrow'>Stage 04 · Sell</div>", unsafe_allow_html=True)
     st.title("Ergo Verification and Sale")
@@ -675,9 +658,9 @@ elif page == "Ergo Verification & Sale":
     else:
         st.caption("No batches verified and sold yet.")
 
-# --------------------------------------------------------------------------
+
 # ANALYTICS
-# --------------------------------------------------------------------------
+
 elif page == "Analytics":
     st.markdown("<div class='eyebrow'>Validation</div>", unsafe_allow_html=True)
     st.title("Analytics")
@@ -727,9 +710,8 @@ elif page == "Analytics":
         fig3.update_layout(paper_bgcolor=BG, plot_bgcolor=BG, font_color=INK, height=350)
         st.plotly_chart(fig3, use_container_width=True)
 
-# --------------------------------------------------------------------------
 # LEDGER
-# --------------------------------------------------------------------------
+
 elif page == "Ledger":
     st.markdown("<div class='eyebrow'>Record of account</div>", unsafe_allow_html=True)
     st.title("Cooperative Ledger")
