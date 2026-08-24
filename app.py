@@ -1,157 +1,75 @@
+"""
+Mineral Gleaning Rights - Gold Pass Platform
+Team 11 | Track 1: Responsible Sourcing, Data and Traceability
 
+Run with:   streamlit run app.py
+Keep .streamlit/config.toml alongside this file. That config, not the CSS in
+theme.py, is what themes the top header bar and the dropdown menus.
 
-import streamlit as st
-import pandas as pd
+MODULES
+  store.py    accounts.json and sessions.json on disk
+  auth.py     staff credentials, roles, page permissions
+  theme.py    palette, stylesheet, and the inline-SVG illustration engine
+  landing.py  the public page
+  app.py      routing plus the portal pages
+
+TWO POPULATIONS, NEVER CONFLATED
+  Staff sign in. Field officers, verification officers, coordinators, the Ergo
+  liaison, administrators. They are the only people who ever see a login screen.
+
+  Workers on the dumps do not. They are records in the members roster,
+  registered in person by a field officer, and their touchpoints are a printed
+  receipt, an SMS and the USSD line. There is no code path that gives a roster
+  record a credential.
+
+DOMAIN NOTES CARRIED FORWARD
+  1. Batch weight is TONNES, not kilograms.
+  2. FLAG_THRESHOLD is 4.10, the 99th percentile of a chi distribution with six
+     degrees of freedom. It is derived, not guessed.
+  3. compute_payout is the single source of truth for money.
+  4. Ergo re-tests against the dump's reference profile, so it can detect swaps
+     in transit.
+  5. Rejection requires a reason and has a dispute route.
+"""
+
+import hashlib
+import uuid
+from datetime import datetime, timedelta
+
 import numpy as np
+import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-from datetime import datetime, timedelta
-import uuid
+import streamlit as st
 
-
-# PAGE CONFIG & THEME
+# ---------------------------------------------------------------------------
+# PAGE CONFIG AND THEME
+# ---------------------------------------------------------------------------
 
 st.set_page_config(
-    page_title="Mineral Gleaning Rights - Gold Pass",
-    page_icon=None,
+    page_title="Mineral Gleaning Rights | Gold Pass",
+    page_icon="\u26cf\ufe0f",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# Tokens — palette lifted from aerial tailings-dump photography: sand flats,
-# clay haul roads, tree-line green, and the teal tailings pond.
-BG = "#EAE2CC"       # sand / paper
-PANEL = "#DED2AF"    # card panel, one shade darker
-PANEL_DK = "#D2C398" # inset / hover panel
-INK = "#26211A"      # charcoal ink — primary text
-INK_SOFT = "#5B5340" # secondary text
-RUST = "#A85A2E"     # haul road clay — primary accent
-OCHRE = "#8C7530"    # muted khaki gold — secondary accent
-MOSS = "#4F5C40"     # tree green — pass / success
-WATER = "#4C7A6E"    # tailings pond teal — verified / sold
-ALERT = "#86372A"    # deep rust red — reject
-LINE = "#B9A97E"      # dividers / borders
+import auth  # noqa: E402  (must follow set_page_config)
+import landing  # noqa: E402
+import store  # noqa: E402
+import theme  # noqa: E402
+from theme import (  # noqa: E402
+    ALERT, BG, INK, INK_SOFT, LINE, MOSS, MOSS_FILL, OCHRE, OCHRE_FILL,
+    PANEL, PANEL_DK, RUST, RUST_TEXT, WATER, WATER_FILL, _rng_for, money,
+    money_compact,
+)
 
-st.markdown(f"""
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
-<style>
-    html, body, .stApp {{
-        background-color: {BG} !important;
-        color: {INK} !important;
-        font-family: 'Inter', sans-serif;
-    }}
-    section[data-testid="stSidebar"] {{
-        background-color: {PANEL} !important;
-        border-right: 1px solid {LINE};
-    }}
-    h1, h2, h3 {{
-        font-family: 'Fraunces', serif !important;
-        color: {INK} !important;
-        font-weight: 600 !important;
-        letter-spacing: -0.01em;
-    }}
-    h1 {{ border-bottom: 2px solid {RUST}; padding-bottom: 10px; }}
-    .eyebrow {{
-        font-family: 'IBM Plex Mono', monospace;
-        text-transform: uppercase;
-        letter-spacing: 0.14em;
-        font-size: 0.72rem;
-        color: {RUST};
-        margin-bottom: 4px;
-    }}
-    p, span, label, div {{ color: {INK}; }}
-    .stCaption, [data-testid="stCaptionContainer"] {{ color: {INK_SOFT} !important; }}
+theme.inject_css()
+auth.seed_demo_accounts()
+auth.restore_session()
 
-    div[data-testid="stMetric"] {{
-        background-color: {PANEL};
-        border: 1px solid {LINE};
-        border-radius: 2px;
-        padding: 10px 14px;
-    }}
-    div[data-testid="stMetric"] label {{ color: {INK_SOFT} !important; font-family: 'IBM Plex Mono', monospace; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em; }}
-    div[data-testid="stMetricValue"] {{ color: {INK} !important; font-family: 'Fraunces', serif; }}
-
-    div[data-testid="stExpander"], div[data-testid="stContainer"] > div[style*="border"] {{
-        background-color: {PANEL} !important;
-        border: 1px solid {LINE} !important;
-        border-radius: 2px !important;
-    }}
-
-    .stButton > button, .stFormSubmitButton > button, .stDownloadButton > button {{
-        background-color: {INK};
-        color: {BG};
-        border: 1px solid {INK};
-        border-radius: 2px;
-        font-family: 'IBM Plex Mono', monospace;
-        font-size: 0.8rem;
-        text-transform: uppercase;
-        letter-spacing: 0.06em;
-    }}
-    .stButton > button:hover, .stFormSubmitButton > button:hover, .stDownloadButton > button:hover {{
-        background-color: {RUST};
-        border-color: {RUST};
-        color: {BG};
-    }}
-    .stButton > button[kind="primary"] {{
-        background-color: {RUST}; border-color: {RUST}; color: {BG};
-    }}
-
-    .stTextInput input, .stNumberInput input, .stSelectbox div[data-baseweb="select"] > div,
-    .stTextArea textarea {{
-        background-color: {BG} !important;
-        color: {INK} !important;
-        border: 1px solid {LINE} !important;
-        border-radius: 2px !important;
-    }}
-
-    .stDataFrame {{ border: 1px solid {LINE}; }}
-
-    hr {{ border-color: {LINE}; }}
-
-    .tag {{
-        display: inline-block;
-        font-family: 'IBM Plex Mono', monospace;
-        font-size: 0.7rem;
-        text-transform: uppercase;
-        letter-spacing: 0.08em;
-        padding: 3px 8px;
-        border: 1px solid currentColor;
-        border-radius: 0px;
-    }}
-    .tag-pass {{ color: {MOSS}; }}
-    .tag-review {{ color: {OCHRE}; }}
-    .tag-reject {{ color: {ALERT}; }}
-    .tag-sold {{ color: {WATER}; }}
-
-    ::selection {{ background: {RUST}; color: {BG}; }}
-
-    div[role="radiogroup"] label {{
-        font-family: 'IBM Plex Mono', monospace;
-        font-size: 0.85rem;
-        letter-spacing: 0.02em;
-    }}
-</style>
-""", unsafe_allow_html=True)
-
-STATUS_COLORS = {
-    "Gold Pass Issued": MOSS,
-    "Verified & Sold": WATER,
-    "Officer Review": OCHRE,
-    "Rejected": ALERT,
-}
-STATUS_TAG_CLASS = {
-    "Gold Pass Issued": "tag-pass",
-    "Verified & Sold": "tag-sold",
-    "Officer Review": "tag-review",
-    "Rejected": "tag-reject",
-}
-
-def status_tag(status):
-    cls = STATUS_TAG_CLASS.get(status, "tag-review")
-    label = status.upper()
-    return f"<span class='tag {cls}'>{label}</span>"
-
+# ---------------------------------------------------------------------------
+# DOMAIN CONSTANTS
+# ---------------------------------------------------------------------------
 
 FEATURES = ["au_gt", "fe2o3_pct", "sio2_pct", "s_pct", "as_ppm", "u_ppm"]
 FEATURE_LABELS = {
@@ -162,19 +80,61 @@ FEATURE_LABELS = {
     "as_ppm": "Arsenic (ppm)",
     "u_ppm": "Uranium (ppm)",
 }
-FLAG_THRESHOLD = 2.75  # aggregate z-distance above which a batch goes to officer review
 
-#  SESSION STATE
+# The score is sqrt(sum of 6 squared z-scores), which follows a chi distribution
+# with 6 degrees of freedom for a genuine batch. Its mean is 2.35, so the old
+# threshold of 2.75 flagged 27% of honest deliveries. 4.10 is the 99th percentile:
+# one honest batch in a hundred goes to review. This number is defensible on stage.
+FLAG_THRESHOLD = 4.10
+PER_FEATURE_FLAG = 3.0          # a single element this far out is worth a look on its own
+CHI6_MEAN = 2.35
+EXPECTED_FALSE_FLAG_RATE = 0.01
 
+RECOVERY_RATE = 0.85            # gold Ergo actually recovers from delivered material
+PRICE_SHARE = 0.85              # cooperative receives 85% of spot; 15% covers assay, haulage, processing
+COOP_LEVY = 0.10                # of the cooperative payment, held for the co-op fund
+LEADERSHIP_TARGET = 0.30        # team-set target. SOURCE STILL TO VERIFY, see notes at bottom.
 
-def _rng_for(name):
-    seed = abs(hash(name)) % (2**32)
-    return np.random.default_rng(seed)
+STATUS_COLORS = {
+    "Awaiting Scan": INK_SOFT,
+    "Gold Pass Issued": MOSS_FILL,
+    "Verified and Sold": WATER_FILL,
+    "Officer Review": OCHRE_FILL,
+    "Disputed": OCHRE_FILL,
+    "Rejected": ALERT,
+}
+STATUS_TAG_CLASS = {
+    "Awaiting Scan": "tag-wait",
+    "Gold Pass Issued": "tag-pass",
+    "Verified and Sold": "tag-sold",
+    "Officer Review": "tag-review",
+    "Disputed": "tag-review",
+    "Rejected": "tag-reject",
+}
+
+REJECT_REASONS = [
+    "Material does not match the declared dump",
+    "Permit expired or missing at time of collection",
+    "Weight declared does not match weighbridge",
+    "Batch tag broken or unreadable on arrival",
+]
+
+BATCH_COLUMNS = [
+    "batch_id", "dump_name", "member_id", "member_name", "tonnes", "section",
+    "extracted_from", "extracted_to", *FEATURES, "anomaly_score", "status",
+    "logged_at", "scanned_at", "synced", "officer_note", "reject_reason",
+    "ergo_check", "contained_g", "recovered_g", "price_used", "gross_zar",
+    "payout_zar", "levy_zar", "member_zar", "sold_at", "true_source",
+]
+
+# ---------------------------------------------------------------------------
+# HELPERS
+# ---------------------------------------------------------------------------
 
 
 def make_reference_profile(rng):
     au_mean = round(rng.uniform(0.25, 0.85), 3)
-    profile = {
+    return {
         "au_gt": {"mean": au_mean, "std": round(au_mean * 0.10, 4)},
         "fe2o3_pct": {"mean": round(rng.uniform(5, 10), 2), "std": round(rng.uniform(0.4, 0.9), 3)},
         "sio2_pct": {"mean": round(rng.uniform(60, 75), 2), "std": round(rng.uniform(1.5, 3), 3)},
@@ -182,25 +142,221 @@ def make_reference_profile(rng):
         "as_ppm": {"mean": round(rng.uniform(50, 300), 1), "std": round(rng.uniform(8, 25), 2)},
         "u_ppm": {"mean": round(rng.uniform(50, 150), 1), "std": round(rng.uniform(6, 18), 2)},
     }
-    return profile
 
+
+def status_tag(status):
+    cls = STATUS_TAG_CLASS.get(status, "tag-review")
+    return f"<span class='tag {cls}'>{str(status).upper()}</span>"
+
+
+def compute_payout(tonnes, au_gt, spot):
+    """Single source of truth for the money. Previously duplicated in two places,
+    and both copies multiplied by 1000 when they should have divided."""
+    contained_g = float(tonnes) * float(au_gt)          # tonnes x grams-per-tonne
+    recovered_g = contained_g * RECOVERY_RATE
+    gross = recovered_g * float(spot)
+    payout = gross * PRICE_SHARE
+    levy = payout * COOP_LEVY
+    return {
+        "contained_g": round(contained_g, 4),
+        "recovered_g": round(recovered_g, 4),
+        "gross_zar": round(gross, 2),
+        "payout_zar": round(payout, 2),
+        "levy_zar": round(levy, 2),
+        "member_zar": round(payout - levy, 2),
+        "price_used": float(spot),
+    }
+
+
+def profile_distance(a, b):
+    return sum(abs(a[f]["mean"] - b[f]["mean"]) / max(a[f]["std"], 1e-9) for f in FEATURES)
+
+
+def pick_substitute_source(declared):
+    """For the demo, substitute from the most geochemically distant dump so the
+    fraud case flags reliably in front of an audience."""
+    others = [d for d in st.session_state.dump_profiles if d != declared]
+    if not others:
+        return declared
+    ref = st.session_state.dump_profiles[declared]
+    return max(others, key=lambda d: profile_distance(ref, st.session_state.dump_profiles[d]))
+
+
+def draw_sample(source_dump, noise=1.0, rng=None):
+    rng = rng or np.random.default_rng()
+    profile = st.session_state.dump_profiles[source_dump]
+    return {f: float(rng.normal(profile[f]["mean"], profile[f]["std"] * noise)) for f in FEATURES}
+
+
+def anomaly_score(declared_dump, sample):
+    profile = st.session_state.dump_profiles[declared_dump]
+    z = {}
+    for f in FEATURES:
+        mean, std = profile[f]["mean"], profile[f]["std"]
+        z[f] = (sample[f] - mean) / std if std > 0 else 0.0
+    return float(np.sqrt(sum(v ** 2 for v in z.values()))), z
+
+
+def permit_status(dump_name, on_date=None):
+    row = st.session_state.dumps[st.session_state.dumps["dump_name"] == dump_name]
+    if not len(row):
+        return False, "No registration record found"
+    expiry = pd.to_datetime(row.iloc[0]["permit_expiry"]).date()
+    on_date = on_date or datetime.now().date()
+    if expiry < on_date:
+        return False, f"Residue permit expired {expiry:%d %b %Y}"
+    days = (expiry - on_date).days
+    if days < 60:
+        return True, f"Residue permit valid, expires in {days} days"
+    return True, f"Residue permit valid to {expiry:%d %b %Y}"
+
+
+def batch_index(batch_id):
+    match = st.session_state.batches.index[st.session_state.batches["batch_id"] == batch_id]
+    return match[0] if len(match) else None
+
+
+def update_batch(batch_id, **fields):
+    idx = batch_index(batch_id)
+    if idx is None:
+        return
+    for key, value in fields.items():
+        st.session_state.batches.loc[idx, key] = value
+
+
+# ---------------------------------------------------------------------------
+# STATE
+# ---------------------------------------------------------------------------
 
 SEED_DUMPS = [
-    ("Brakpan Central", -26.2308, 28.3629),
-    ("Springs East", -26.2506, 28.4436),
-    ("Nigel North", -26.4227, 28.4735),
-    ("Benoni South", -26.1885, 28.3211),
-    ("Boksburg West", -26.2125, 28.2594),
+    ("Brakpan Central", -26.2308, 28.3629, "RP-GP-2024-0118", 2027),
+    ("Springs East", -26.2506, 28.4436, "RP-GP-2024-0207", 2027),
+    ("Nigel North", -26.4227, 28.4735, "RP-GP-2023-0904", 2026),
+    ("Benoni South", -26.1885, 28.3211, "RP-GP-2025-0033", 2028),
+    ("Boksburg West", -26.2125, 28.2594, "RP-GP-2025-0061", 2028),
+]
+
+SEED_MEMBERS = [
+    ("Thandiwe M.", "Brakpan Central", "Cooperative Chair", "F"),
+    ("Sipho N.", "Brakpan Central", "Collection Officer", "M"),
+    ("Nomvula K.", "Brakpan Central", "Member", "F"),
+    ("Bongani T.", "Springs East", "Cooperative Chair", "M"),
+    ("Precious D.", "Springs East", "Member", "F"),
+    ("Lindiwe P.", "Nigel North", "Collection Officer", "F"),
+    ("Zanele R.", "Nigel North", "Cooperative Chair", "F"),
 ]
 
 
+def add_member(name, dump_name, role, gender, id_ref="", verified_by="", silent=False):
+    """Adds a WORKER to the roster. This is a data record and nothing else.
+    There is deliberately no password, email or account field here: workers
+    never sign in. verified_by carries the name of the staff member who checked
+    this person in the flesh, which is the social verification layer."""
+    row = {
+        "member_id": f"CM-{uuid.uuid4().hex[:6].upper()}",
+        "name": name,
+        "dump_name": dump_name,
+        "role": role,
+        "gender": gender,
+        "id_ref": id_ref,
+        "verified_by": verified_by,
+        "join_date": datetime.now().strftime("%Y-%m-%d"),
+    }
+    st.session_state.members = pd.concat(
+        [st.session_state.members, pd.DataFrame([row])], ignore_index=True
+    )
+    if not silent:
+        st.success(f"{name} added to the {dump_name} cooperative as {role}.")
+    return row["member_id"]
+
+
+def log_haul(dump_name, member_id, tonnes, section, days_worked, synced=True, when=None, silent=False):
+    """Stage 02. Custody starts here, with a named person attached to it."""
+    when = when or datetime.now()
+    member = st.session_state.members[st.session_state.members["member_id"] == member_id]
+    member_name = member.iloc[0]["name"] if len(member) else "Unknown"
+    row = {c: None for c in BATCH_COLUMNS}
+    row.update({
+        "batch_id": f"MGR-{uuid.uuid4().hex[:8].upper()}",
+        "dump_name": dump_name,
+        "member_id": member_id,
+        "member_name": member_name,
+        "tonnes": round(float(tonnes), 2),
+        "section": section,
+        "extracted_from": (when - timedelta(days=days_worked)).strftime("%Y-%m-%d"),
+        "extracted_to": when.strftime("%Y-%m-%d"),
+        "status": "Awaiting Scan",
+        "logged_at": when.strftime("%Y-%m-%d %H:%M"),
+        "synced": bool(synced),
+        "officer_note": "",
+        "reject_reason": "",
+        "ergo_check": "",
+    })
+    st.session_state.batches = pd.concat(
+        [st.session_state.batches, pd.DataFrame([row])], ignore_index=True
+    )
+    if not silent:
+        if synced:
+            st.success(f"Haul {row['batch_id']} logged for {member_name}. Ready for the collection point.")
+        else:
+            st.info(f"Haul {row['batch_id']} saved on the device. It will upload when the phone finds signal.")
+    return row["batch_id"]
+
+
+def scan_batch(batch_id, sample, true_source, silent=False):
+    """Stage 03. Tests the material against the reference profile of the dump it
+    was declared from. This is a test of the gold, not of the person carrying it."""
+    idx = batch_index(batch_id)
+    if idx is None:
+        return None
+    batch = st.session_state.batches.loc[idx]
+    score, _ = anomaly_score(batch["dump_name"], sample)
+    ok, permit_note = permit_status(batch["dump_name"])
+
+    if not ok:
+        status = "Officer Review"
+        note = permit_note
+    elif score > FLAG_THRESHOLD:
+        status = "Officer Review"
+        note = ""
+    else:
+        status = "Gold Pass Issued"
+        note = ""
+
+    fields = {f: sample[f] for f in FEATURES}
+    fields.update({
+        "anomaly_score": round(score, 3),
+        "status": status,
+        "scanned_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "true_source": true_source,
+        "officer_note": note,
+    })
+    if status == "Gold Pass Issued":
+        fields.update(compute_payout(batch["tonnes"], sample["au_gt"],
+                                     st.session_state.spot_price_zar_per_g))
+    for key, value in fields.items():
+        st.session_state.batches.loc[idx, key] = value
+
+    if not silent:
+        if status == "Gold Pass Issued":
+            st.success(f"{batch_id} matches {batch['dump_name']}. Gold Pass issued.")
+        elif not ok:
+            st.warning(f"{batch_id} held: {permit_note}. Sent to officer review.")
+        else:
+            st.warning(
+                f"{batch_id} does not match the profile of {batch['dump_name']} "
+                f"(score {score:.2f} against a limit of {FLAG_THRESHOLD}). "
+                "Sent to officer review. Nothing has been rejected."
+            )
+    return status
+
+
 def init_state():
-    if "initialized" in st.session_state:
+    if st.session_state.get("initialized"):
         return
 
-    dump_profiles = {}
-    dump_rows = []
-    for name, lat, lon in SEED_DUMPS:
+    dump_profiles, dump_rows = {}, []
+    for name, lat, lon, permit_no, expiry_year in SEED_DUMPS:
         rng = _rng_for(name)
         dump_profiles[name] = make_reference_profile(rng)
         dump_rows.append({
@@ -208,206 +364,195 @@ def init_state():
             "lat": lat,
             "lon": lon,
             "status": "Active",
+            "permit_no": permit_no,
+            "permit_expiry": f"{expiry_year}-06-30",
+            "cooperative_no": f"CO-OP {2020 + (expiry_year % 5)}/{abs(hash(name)) % 9000 + 1000}/24",
             "registered_date": (datetime.now() - timedelta(days=int(rng.integers(20, 200)))).strftime("%Y-%m-%d"),
         })
 
     st.session_state.dump_profiles = dump_profiles
     st.session_state.dumps = pd.DataFrame(dump_rows)
-    st.session_state.members = pd.DataFrame(columns=[
-        "member_id", "name", "dump_name", "role", "gender", "join_date"
-    ])
-    st.session_state.batches = pd.DataFrame(columns=[
-        "batch_id", "dump_name", "weight_kg", *FEATURES, "anomaly_score",
-        "status", "collected_at", "officer_note", "resale_check", "payout_zar", "sold_at",
-    ])
+    st.session_state.members = pd.DataFrame(
+        columns=["member_id", "name", "dump_name", "role", "gender",
+                 "id_ref", "verified_by", "join_date"]
+    )
+    st.session_state.batches = pd.DataFrame(columns=BATCH_COLUMNS)
     st.session_state.spot_price_zar_per_g = 1850.0
     st.session_state.initialized = True
 
-    seed_members = [
-        ("Thandiwe M.", "Brakpan Central", "Cooperative Chair", "F"),
-        ("Sipho N.", "Brakpan Central", "Collection Officer", "M"),
-        ("Nomvula K.", "Brakpan Central", "Member", "F"),
-        ("Bongani T.", "Springs East", "Cooperative Chair", "M"),
-        ("Precious D.", "Springs East", "Member", "F"),
-        ("Lindiwe P.", "Nigel North", "Collection Officer", "F"),
-    ]
-    for nm, dp, role, gender in seed_members:
-        add_member(nm, dp, role, gender, silent=True)
+    for nm, dp, role, gender in SEED_MEMBERS:
+        add_member(nm, dp, role, gender, id_ref="SA-ID on file",
+                   verified_by="Nomsa Dlamini (field officer)", silent=True)
 
     rng = np.random.default_rng(7)
-    for i in range(6):
+    members = st.session_state.members
+    for i in range(7):
         dump = SEED_DUMPS[i % len(SEED_DUMPS)][0]
-        suspicious = i == 4
-        sample = draw_sample(dump, suspicious=suspicious, rng=rng)
-        weight = round(rng.uniform(8, 40), 1)
-        record_batch(dump, weight, sample, when=datetime.now() - timedelta(days=6 - i), silent=True)
-
-
-def add_member(name, dump_name, role, gender, silent=False):
-    row = {
-        "member_id": f"CM-{uuid.uuid4().hex[:6].upper()}",
-        "name": name,
-        "dump_name": dump_name,
-        "role": role,
-        "gender": gender,
-        "join_date": datetime.now().strftime("%Y-%m-%d"),
-    }
-    st.session_state.members = pd.concat(
-        [st.session_state.members, pd.DataFrame([row])], ignore_index=True
-    )
-    if not silent:
-        st.success(f"{name} registered to {dump_name} as {role}.")
-
-
-def draw_sample(dump_name, suspicious=False, noise=1.0, rng=None):
-    rng = rng or np.random.default_rng()
-    profile = st.session_state.dump_profiles[dump_name]
-    sample = {}
-    if suspicious:
-        other_dumps = [d for d in st.session_state.dump_profiles if d != dump_name]
-        source = rng.choice(other_dumps) if other_dumps else dump_name
-        source_profile = st.session_state.dump_profiles[source]
-        for f in FEATURES:
-            sample[f] = float(rng.normal(source_profile[f]["mean"], source_profile[f]["std"] * noise))
-    else:
-        for f in FEATURES:
-            sample[f] = float(rng.normal(profile[f]["mean"], profile[f]["std"] * noise))
-    return sample
-
-
-def anomaly_score(dump_name, sample):
-    profile = st.session_state.dump_profiles[dump_name]
-    z_scores = {}
-    for f in FEATURES:
-        mean, std = profile[f]["mean"], profile[f]["std"]
-        z_scores[f] = (sample[f] - mean) / std if std > 0 else 0.0
-    score = float(np.sqrt(sum(v ** 2 for v in z_scores.values())))
-    return score, z_scores
-
-
-def record_batch(dump_name, weight_kg, sample, when=None, silent=False):
-    score, _ = anomaly_score(dump_name, sample)
-    status = "Officer Review" if score > FLAG_THRESHOLD else "Gold Pass Issued"
-    when = when or datetime.now()
-    payout = None
-    sold_at = None
-    if status == "Gold Pass Issued":
-        au_grams = weight_kg * 1000 * (sample["au_gt"] / 1000.0)
-        recovered_g = au_grams * 0.85
-        payout = round(recovered_g * st.session_state.spot_price_zar_per_g * 0.85, 2)
-
-    row = {
-        "batch_id": f"MGR-{uuid.uuid4().hex[:8].upper()}",
-        "dump_name": dump_name,
-        "weight_kg": weight_kg,
-        **sample,
-        "anomaly_score": round(score, 3),
-        "status": status,
-        "collected_at": when.strftime("%Y-%m-%d %H:%M"),
-        "officer_note": "",
-        "resale_check": "",
-        "payout_zar": payout,
-        "sold_at": sold_at,
-    }
-    st.session_state.batches = pd.concat(
-        [st.session_state.batches, pd.DataFrame([row])], ignore_index=True
-    )
-    if not silent:
-        if status == "Gold Pass Issued":
-            st.success(f"Batch {row['batch_id']} passed the scan — Gold Pass issued.")
-        else:
-            st.warning(f"Batch {row['batch_id']} flagged (score {score:.2f}) — sent to officer review, not rejected.")
-    return row["batch_id"]
+        pool = members[members["dump_name"] == dump]
+        member_id = pool.iloc[i % len(pool)]["member_id"] if len(pool) else members.iloc[0]["member_id"]
+        when = datetime.now() - timedelta(days=7 - i)
+        offline = i == 6
+        bid = log_haul(dump, member_id, float(rng.uniform(3, 14)), f"Block {chr(65 + i % 4)}",
+                       int(rng.integers(2, 6)), synced=not offline, when=when, silent=True)
+        if offline:
+            continue
+        source = pick_substitute_source(dump) if i == 4 else dump
+        scan_batch(bid, draw_sample(source, rng=rng), source, silent=True)
+        if i < 3:
+            update_batch(bid, status="Verified and Sold",
+                         ergo_check="Consistent with reference profile",
+                         sold_at=(when + timedelta(hours=6)).strftime("%Y-%m-%d %H:%M"))
 
 
 init_state()
 
-# SIDEBAR NAV
+# ---------------------------------------------------------------------------
+# ROUTING GATE
+# ---------------------------------------------------------------------------
+# Signed out, the only thing that renders is the public page and the two forms
+# that lead out of it. Signed in but not yet approved, the only thing that
+# renders is the pending notice. Neither path reaches a portal page.
 
-st.sidebar.markdown("<div class='eyebrow'>Team 11 · Track 1</div>", unsafe_allow_html=True)
-st.sidebar.markdown("### Mineral Gleaning Rights")
-st.sidebar.caption("Gold Pass Platform · East Rand")
-st.sidebar.markdown("---")
+user = auth.current_user()
 
-page = st.sidebar.radio(
-    "Navigate",
-    [
-        "Dashboard",
-        "Register a Dump",
-        "Cooperative Members",
-        "Collection Point — Scan",
-        "Officer Review Queue",
-        "Ergo Verification & Sale",
-        "Analytics",
-        "Ledger",
-    ],
-    label_visibility="collapsed",
-)
+if not user:
+    view = st.session_state.get("view", "landing")
+    if view == "signin":
+        auth.render_sign_in()
+    elif view == "signup":
+        auth.render_sign_up()
+    else:
+        landing.render(auth.DEMO_ACCOUNTS, auth.ROLES)
+    st.stop()
 
-st.sidebar.markdown("---")
-st.session_state.spot_price_zar_per_g = st.sidebar.number_input(
-    "Gold spot price (ZAR/g)", min_value=100.0, value=st.session_state.spot_price_zar_per_g, step=10.0
-)
-st.sidebar.caption(f"Anomaly flag threshold: z-distance above {FLAG_THRESHOLD}")
-st.sidebar.caption("Prototype · simulated data · not connected to live lab equipment")
+if not auth.is_active(user):
+    auth.render_pending(user)
+    st.stop()
+
+ROLE = user["role"]
+IS_ADMIN = ROLE == "administrator"
+
+# ---------------------------------------------------------------------------
+# SIDEBAR
+# ---------------------------------------------------------------------------
 
 batches = st.session_state.batches
 dumps = st.session_state.dumps
 members = st.session_state.members
 
-MAP_STYLE = "carto-positron"
+st.sidebar.markdown("<div class='eyebrow'>Team 11 / Track 1</div>", unsafe_allow_html=True)
+st.sidebar.markdown(
+    f'<div class="brand">{theme.logo_mark(38)}<div>'
+    f'<div class="brand-name">Mineral Gleaning Rights</div>'
+    f'<div class="brand-sub">Gold Pass &middot; East Rand</div>'
+    f'</div></div>',
+    unsafe_allow_html=True,
+)
 
+pending_sync = int((~batches["synced"].fillna(True).astype(bool)).sum()) if len(batches) else 0
+if pending_sync:
+    st.sidebar.warning(f"{pending_sync} haul(s) captured offline, waiting to upload")
+    if st.sidebar.button("Upload queued hauls"):
+        st.session_state.batches["synced"] = True
+        st.rerun()
+
+st.sidebar.markdown("---")
+
+# Only the pages this role can open are offered. Nothing is shown and refused.
+ALLOWED = auth.pages_for(ROLE)
+page = st.sidebar.radio("Navigate", ALLOWED, label_visibility="collapsed")
+
+auth.render_account_sidebar(user)
+
+st.sidebar.markdown("---")
+st.session_state.spot_price_zar_per_g = st.sidebar.number_input(
+    "Gold spot price (ZAR per gram)", min_value=100.0,
+    value=float(st.session_state.spot_price_zar_per_g), step=10.0,
+)
+
+with st.sidebar.expander("Model assumptions"):
+    st.caption(f"Plant recovery: {RECOVERY_RATE:.0%} of contained gold")
+    st.caption(f"Cooperative receives {PRICE_SHARE:.0%} of spot. The {1 - PRICE_SHARE:.0%} "
+               "deduction covers assay, haulage and processing.")
+    st.caption(f"Cooperative fund levy: {COOP_LEVY:.0%} of each payment")
+    st.caption(f"Review threshold: score above {FLAG_THRESHOLD}. A genuine batch averages "
+               f"{CHI6_MEAN}, so about {EXPECTED_FALSE_FLAG_RATE:.0%} of honest hauls go to review.")
+
+st.sidebar.caption("Prototype. Simulated assays, not connected to lab equipment.")
+if IS_ADMIN and st.sidebar.button("Reset demo data"):
+    keep = st.session_state.get("auth_email")
+    for key in list(st.session_state.keys()):
+        del st.session_state[key]
+    st.session_state.auth_email = keep
+    st.rerun()
+
+
+
+# ---------------------------------------------------------------------------
 # DASHBOARD
+# ---------------------------------------------------------------------------
 
 if page == "Dashboard":
-    st.markdown("<div class='eyebrow'>Site overview</div>", unsafe_allow_html=True)
-    st.title("Mineral Gleaning Rights")
-    st.caption("A cooperative traceability model for South Africa's East Rand — live platform view")
+    theme.hero_band(
+        "Site overview",
+        "Mineral Gleaning Rights",
+        "A cooperative traceability model for end-of-life tailings on South Africa's East Rand. "
+        "Every haul is tied to a named member, tested against the geochemistry of the dump it "
+        "was declared from, and paid the same day it clears.",
+    )
+    theme.process_ribbon()
+
+    scanned = batches[batches["status"] != "Awaiting Scan"] if len(batches) else batches
+    passed_first_time = scanned[scanned["status"].isin(["Gold Pass Issued", "Verified and Sold"])]
 
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Registered dumps", len(dumps))
-    c2.metric("Cooperative members", len(members))
-    c3.metric("Batches processed", len(batches))
-    pass_rate = 0
-    if len(batches):
-        issued_or_sold = batches["status"].isin(["Gold Pass Issued", "Verified & Sold"]).sum()
-        pass_rate = round(100 * issued_or_sold / len(batches), 1)
-    c4.metric("First-pass rate", f"{pass_rate}%")
-    total_payout = batches["payout_zar"].dropna().sum() if len(batches) else 0
-    c5.metric("Paid to cooperative", f"R {total_payout:,.0f}")
+    c2.metric("Workers", len(members))
+    c3.metric("Tonnes handled", f"{batches['tonnes'].fillna(0).sum():,.1f}" if len(batches) else "0")
+    rate = round(100 * len(passed_first_time) / len(scanned), 1) if len(scanned) else 0
+    c4.metric("First-pass rate", f"{rate}%")
+    paid = batches["payout_zar"].dropna().sum() if len(batches) else 0
+    c5.metric("Paid out", money_compact(paid))
 
-    st.markdown("### Registered collection points — East Rand")
+    st.markdown("### Registered collection points")
     if len(dumps):
+        theme.dump_cards([
+            {
+                "dump_name": d["dump_name"],
+                "permit_no": d["permit_no"],
+                "hauls": int((batches["dump_name"] == d["dump_name"]).sum()) if len(batches) else 0,
+                "tonnes": float(batches[batches["dump_name"] == d["dump_name"]]["tonnes"]
+                                .fillna(0).sum()) if len(batches) else 0.0,
+                "permit_ok": permit_status(d["dump_name"])[0],
+                "permit_note": permit_status(d["dump_name"])[1],
+            }
+            for _, d in dumps.iterrows()
+        ])
+        st.write("")
         map_df = dumps.copy()
-        map_df["batches"] = map_df["dump_name"].apply(lambda d: (batches["dump_name"] == d).sum())
-        fig = px.scatter_mapbox(
-            map_df, lat="lat", lon="lon", hover_name="dump_name",
-            hover_data={"status": True, "batches": True, "lat": False, "lon": False},
-            zoom=9.3, size="batches", size_max=26,
-        )
-        fig.update_traces(marker=dict(color=RUST))
-        fig.update_layout(
-            mapbox_style=MAP_STYLE, paper_bgcolor=BG, plot_bgcolor=BG,
-            font_color=INK, margin=dict(l=0, r=0, t=0, b=0), height=420,
-        )
-        st.plotly_chart(fig, use_container_width=True)
+        map_df["hauls"] = map_df["dump_name"].apply(lambda d: int((batches["dump_name"] == d).sum()))
+        map_df["marker"] = map_df["hauls"] + 1  # a dump with no hauls should still be visible
+        st.plotly_chart(theme.render_map(map_df, size_col="marker"), width="stretch")
 
-    st.markdown("### Recent batch activity")
+    st.markdown("### Recent hauls")
     if len(batches):
-        recent = batches.sort_values("collected_at", ascending=False).head(8).copy()
-        recent["status"] = recent["status"].apply(status_tag)
-        show = recent[["batch_id", "dump_name", "weight_kg", "anomaly_score", "status", "collected_at"]]
-        show.columns = ["Batch", "Dump", "Weight (kg)", "Score", "Status", "Collected"]
-        st.write(show.to_html(escape=False, index=False), unsafe_allow_html=True)
+        recent = batches.sort_values("logged_at", ascending=False).head(8)
+        show = recent[["batch_id", "dump_name", "member_name", "tonnes",
+                       "anomaly_score", "status", "payout_zar", "logged_at"]].copy()
+        show.columns = ["Batch", "Dump", "Logged by", "Tonnes", "Score", "Status", "Payout (ZAR)", "Logged"]
+        st.dataframe(show, width="stretch", hide_index=True)
     else:
-        st.info("No batches yet — submit one from the Collection Point page.")
+        st.info("No hauls yet. Start at 02 Extract and log a haul.")
 
-# REGISTER A DUMP
+# ---------------------------------------------------------------------------
+# 01 REGISTER A DUMP
+# ---------------------------------------------------------------------------
 
-elif page == "Register a Dump":
-    st.markdown("<div class='eyebrow'>Stage 01 · Register</div>", unsafe_allow_html=True)
-    st.title("Register a Dump")
-    st.caption("Logging GPS, geology and grade to create the reference profile.")
+elif page == "01 Register a dump":
+    theme.page_header("Stage 01 / Register", "Register a dump", "register")
+    theme.process_ribbon("01")
+    st.caption("Two things happen here. The residue permit and cooperative registration are recorded, "
+               "and initial sampling builds the geochemical reference profile the dump will be tested against.")
 
     with st.form("register_dump_form"):
         col1, col2 = st.columns(2)
@@ -415,323 +560,629 @@ elif page == "Register a Dump":
             name = st.text_input("Dump name", placeholder="e.g. Kempton Ridge")
             lat = st.number_input("Latitude", value=-26.20, format="%.4f")
             lon = st.number_input("Longitude", value=28.35, format="%.4f")
+            au_estimate = st.slider("Measured Au grade (g/t)", 0.10, 1.20, 0.45, 0.01)
         with col2:
-            au_estimate = st.slider("Estimated Au grade (g/t)", 0.1, 1.2, 0.45, 0.01)
-            st.caption("Other geochemical parameters (Fe2O3, SiO2, S, As, U) are logged automatically "
-                       "from the site's tailings assay and used to build the reference profile.")
-        submitted = st.form_submit_button("Declare end-of-life and register dump", type="primary")
+            permit_no = st.text_input("Residue stockpile permit number", placeholder="RP-GP-2026-0000")
+            permit_expiry = st.date_input("Permit expiry", value=datetime.now().date() + timedelta(days=730))
+            coop_no = st.text_input("Cooperative registration number", placeholder="CO-OP 2026/1234/24")
+            st.caption("Fe2O3, SiO2, sulphide S, arsenic and uranium are taken from the same assay "
+                       "and stored as the reference profile.")
+        submitted = st.form_submit_button("Register dump", type="primary")
 
     if submitted:
         if not name:
-            st.error("Give the dump a name before registering.")
+            st.error("Enter a dump name.")
         elif name in st.session_state.dump_profiles:
-            st.error("A dump with that name is already registered.")
+            st.error(f"{name} is already registered.")
+        elif not permit_no:
+            st.error("A residue stockpile permit number is required. Without it a haul cannot be scanned.")
         else:
-            rng = _rng_for(name)
-            profile = make_reference_profile(rng)
-            profile["au_gt"]["mean"] = round(au_estimate, 3)
-            profile["au_gt"]["std"] = round(au_estimate * 0.10, 4)
+            profile = make_reference_profile(_rng_for(name))
+            profile["au_gt"] = {"mean": round(au_estimate, 3), "std": round(au_estimate * 0.10, 4)}
             st.session_state.dump_profiles[name] = profile
-            new_row = {
-                "dump_name": name, "lat": lat, "lon": lon, "status": "Active",
-                "registered_date": datetime.now().strftime("%Y-%m-%d"),
-            }
-            st.session_state.dumps = pd.concat(
-                [st.session_state.dumps, pd.DataFrame([new_row])], ignore_index=True
-            )
-            st.success(f"'{name}' registered. Reference profile generated from initial sampling.")
+            st.session_state.dumps = pd.concat([
+                st.session_state.dumps,
+                pd.DataFrame([{
+                    "dump_name": name, "lat": lat, "lon": lon, "status": "Active",
+                    "permit_no": permit_no, "permit_expiry": str(permit_expiry),
+                    "cooperative_no": coop_no or "Pending",
+                    "registered_date": datetime.now().strftime("%Y-%m-%d"),
+                }]),
+            ], ignore_index=True)
+            st.success(f"{name} registered. Reference profile built from the initial assay.")
             st.json({FEATURE_LABELS[f]: profile[f] for f in FEATURES})
 
-    st.markdown("### Currently registered dumps")
-    st.dataframe(st.session_state.dumps, use_container_width=True, hide_index=True)
+    st.markdown("### Registered dumps")
+    if len(dumps):
+        view = dumps[["dump_name", "permit_no", "permit_expiry", "cooperative_no",
+                      "status", "registered_date"]].copy()
+        view["permit"] = view["dump_name"].apply(lambda d: permit_status(d)[1])
+        view.columns = ["Dump", "Permit no.", "Expiry", "Cooperative no.", "Status", "Registered", "Permit check"]
+        st.dataframe(view, width="stretch", hide_index=True)
 
-    with st.expander("View reference geochemical profiles"):
+    with st.expander("Reference geochemical profiles"):
         for d, prof in st.session_state.dump_profiles.items():
             st.markdown(f"**{d}**")
-            prof_df = pd.DataFrame(prof).T.rename(index=FEATURE_LABELS)
-            st.dataframe(prof_df, use_container_width=True)
+            st.dataframe(pd.DataFrame(prof).T.rename(index=FEATURE_LABELS), width="stretch")
 
-
+# ---------------------------------------------------------------------------
 # COOPERATIVE MEMBERS
+# ---------------------------------------------------------------------------
 
-elif page == "Cooperative Members":
-    st.markdown("<div class='eyebrow'>Cooperative roster</div>", unsafe_allow_html=True)
-    st.title("Cooperative Members")
-    st.caption("One gleaning permit, one registered dump. Members register as a cooperative, not individually.")
+elif page == "Cooperative members":
+    theme.page_header("Cooperative roster", "Cooperative members", "members")
+    st.caption("One gleaning permit, one registered dump. People join as a cooperative, not individually.")
 
     if not len(dumps):
-        st.warning("Register a dump first.")
+        st.warning("Register a dump first. Members are attached to a permitted dump.")
     else:
         with st.form("add_member_form"):
             c1, c2, c3, c4 = st.columns(4)
-            with c1:
-                nm = st.text_input("Full name")
-            with c2:
-                dp = st.selectbox("Dump", dumps["dump_name"].tolist())
-            with c3:
-                role = st.selectbox("Role", ["Member", "Collection Officer", "Cooperative Chair"])
-            with c4:
-                gender = st.selectbox("Gender", ["F", "M", "Other / prefer not to say"])
-            add = st.form_submit_button("Register member", type="primary")
-        if add:
-            if nm:
-                add_member(nm, dp, role, gender)
-            else:
-                st.error("Enter a name.")
+            nm = c1.text_input("Full name")
+            dp = c2.selectbox("Dump", dumps["dump_name"].tolist())
+            role = c3.selectbox("Role", ["Member", "Collection Officer", "Cooperative Chair"])
+            gender = c4.selectbox("Gender", ["F", "M", "Other or prefer not to say"])
+            if st.form_submit_button("Add member", type="primary"):
+                if nm:
+                    add_member(nm, dp, role, gender,
+                               verified_by=f"{user['name']} ({auth.ROLES[ROLE].lower()})")
+                    st.rerun()
+                else:
+                    st.error("Enter a name.")
 
-        st.markdown("### Cooperative roster")
-        st.dataframe(members, use_container_width=True, hide_index=True)
-
-        st.markdown("### Leadership quota — 30% minimum, per the African Mining Vision")
+        st.markdown("### Roster and earnings")
         if len(members):
-            leaders = members[members["role"] == "Cooperative Chair"]
-            women_leaders = (leaders["gender"] == "F").sum()
-            total_leaders = len(leaders)
-            pct = round(100 * women_leaders / total_leaders, 1) if total_leaders else 0
-            colA, colB = st.columns(2)
-            colA.metric("Women in chair roles", f"{women_leaders} / {total_leaders}")
-            colB.metric("Share", f"{pct}%", delta="meets quota" if pct >= 30 else "below 30% quota",
-                        delta_color="normal" if pct >= 30 else "inverse")
+            theme.person_cards([
+                {
+                    "name": m["name"],
+                    "key": m["member_id"],
+                    "role": m["role"],
+                    "dump_name": m["dump_name"],
+                    "tonnes": float(batches[batches["member_id"] == m["member_id"]]["tonnes"]
+                                    .fillna(0).sum()) if len(batches) else 0.0,
+                    "earned": float(batches[batches["member_id"] == m["member_id"]]["member_zar"]
+                                    .dropna().sum()) if len(batches) else 0.0,
+                }
+                for _, m in members.iterrows()
+            ])
+            st.write("")
+            roster = members.copy()
+            if len(batches):
+                earned = batches.groupby("member_id")["member_zar"].sum(min_count=1)
+                hauled = batches.groupby("member_id")["tonnes"].sum(min_count=1)
+                roster["earned_zar"] = roster["member_id"].map(earned).fillna(0)
+                roster["tonnes"] = roster["member_id"].map(hauled).fillna(0)
+            else:
+                roster["earned_zar"] = 0.0
+                roster["tonnes"] = 0.0
+            view = roster[["member_id", "name", "dump_name", "role", "tonnes", "earned_zar", "join_date"]].copy()
+            view.columns = ["Member ID", "Name", "Dump", "Role", "Tonnes hauled", "Earned (ZAR)", "Joined"]
+            st.dataframe(view, width="stretch", hide_index=True)
+
+            st.markdown("### Women in leadership")
+            leaders = members[members["role"].isin(["Cooperative Chair", "Collection Officer"])]
+            women = int((leaders["gender"] == "F").sum())
+            total = len(leaders)
+            pct = round(100 * women / total, 1) if total else 0
+            a, b = st.columns(2)
+            a.metric("Women in chair or officer roles", f"{women} of {total}")
+            b.metric("Share", f"{pct}%",
+                     delta="at or above target" if pct >= LEADERSHIP_TARGET * 100 else "below target",
+                     delta_color="normal" if pct >= LEADERSHIP_TARGET * 100 else "inverse")
+            st.caption(f"Target of {LEADERSHIP_TARGET:.0%} is set by the team. Confirm the source before "
+                       "citing it on stage. See the note at the bottom of app.py.")
         else:
-            st.info("No members registered yet.")
+            st.info("No members yet. Add the first one above.")
 
+# ---------------------------------------------------------------------------
+# 02 EXTRACT AND LOG
+# ---------------------------------------------------------------------------
 
-# COLLECTION POINT — SCAN
+elif page == "02 Extract and log a haul":
+    theme.page_header("Stage 02 / Extract", "Extract and log a haul", "extract")
+    theme.process_ribbon("02")
+    st.caption("Custody starts here. A named member records what they took, from which block, over which days. "
+               "The form works with no signal and uploads when the phone finds one.")
 
-elif page == "Collection Point — Scan":
-    st.markdown("<div class='eyebrow'>Stage 03 · Verify</div>", unsafe_allow_html=True)
-    st.title("Collection Point")
-    st.caption("Weigh, tag, sample. The batch is tested against its declared dump's reference profile. "
-               "A mismatch goes to officer review — it is never an automatic rejection.")
+    if not len(members):
+        st.warning("Add cooperative members first. A haul has to belong to someone.")
+    else:
+        with st.form("log_haul_form"):
+            c1, c2 = st.columns(2)
+            with c1:
+                dump_choice = c1.selectbox("Dump", dumps["dump_name"].tolist())
+                pool = members[members["dump_name"] == dump_choice]
+                if not len(pool):
+                    st.warning("No members registered at this dump yet.")
+                    options = {}
+                else:
+                    options = {f"{r['name']} ({r['role']})": r["member_id"] for _, r in pool.iterrows()}
+                who = c1.selectbox("Logged by", list(options.keys()) or ["No members at this dump"])
+                section = c1.text_input("Block or section", value="Block A")
+            with c2:
+                tonnes = c2.number_input("Material extracted (tonnes)", min_value=0.10, value=5.00, step=0.25,
+                                         help="At 0.45 g/t, one tonne holds about 0.45 g of gold. "
+                                              "Payments only make sense at tonne scale.")
+                days_worked = c2.number_input("Days worked on this haul", min_value=1, value=3, step=1)
+                offline = c2.checkbox("Captured offline, no signal at the dump", value=False)
+                preview = compute_payout(tonnes, st.session_state.dump_profiles[dump_choice]["au_gt"]["mean"],
+                                         st.session_state.spot_price_zar_per_g)
+                c2.caption(f"Indicative value at this dump's grade: {money(preview['member_zar'])} to the member "
+                           f"after the {COOP_LEVY:.0%} cooperative levy. Final figure comes from the assay.")
+            if st.form_submit_button("Log this haul", type="primary"):
+                if not options:
+                    st.error("Add a member at this dump before logging a haul.")
+                else:
+                    ok, note = permit_status(dump_choice)
+                    if not ok:
+                        st.error(f"{note}. Renew the permit before extracting from this dump.")
+                    else:
+                        log_haul(dump_choice, options[who], tonnes, section, days_worked, synced=not offline)
 
-    if not len(dumps):
-        st.warning("Register a dump first.")
+    st.markdown("### Hauls waiting for the collection point")
+    waiting = batches[batches["status"] == "Awaiting Scan"] if len(batches) else batches
+    if len(waiting):
+        view = waiting[["batch_id", "dump_name", "member_name", "tonnes", "section",
+                        "extracted_from", "extracted_to", "synced"]].copy()
+        view["synced"] = view["synced"].map({True: "Uploaded", False: "On device"})
+        view.columns = ["Batch", "Dump", "Logged by", "Tonnes", "Block", "From", "To", "Sync"]
+        st.dataframe(view, width="stretch", hide_index=True)
+    else:
+        st.caption("Nothing waiting. Every logged haul has been scanned.")
+
+# ---------------------------------------------------------------------------
+# 03 COLLECTION POINT SCAN
+# ---------------------------------------------------------------------------
+
+elif page == "03 Collection point scan":
+    theme.page_header("Stage 03 / Verify", "Collection point", "scan")
+    theme.process_ribbon("03")
+    st.caption("The material is sampled and tested against the reference profile of the dump it was "
+               "declared from. A mismatch means the gold does not look like it came from where it says. "
+               "It goes to a person for review. It is never an automatic rejection.")
+
+    queue = batches[(batches["status"] == "Awaiting Scan") & (batches["synced"] == True)] if len(batches) else batches
+    if not len(queue):
+        st.info("No uploaded hauls waiting to be scanned. Log one at stage 02, or upload the offline queue "
+                "from the sidebar.")
     else:
         col1, col2 = st.columns([1, 1])
         with col1:
-            dump_choice = st.selectbox("Registered dump this batch is declared from", dumps["dump_name"].tolist())
-            weight = st.number_input("Batch weight (kg)", min_value=0.5, value=15.0, step=0.5)
+            labels = {f"{r['batch_id']} | {r['dump_name']} | {r['tonnes']} t | {r['member_name']}": r["batch_id"]
+                      for _, r in queue.iterrows()}
+            chosen = st.selectbox("Haul to scan", list(labels.keys()))
+            batch_id = labels[chosen]
+            row = batches[batches["batch_id"] == batch_id].iloc[0]
+
+            ok, note = permit_status(row["dump_name"])
+            (st.caption if ok else st.error)(note)
+
             mode = st.radio(
-                "Sample source",
-                ["Simulate a genuine sample from this dump", "Simulate a suspicious sample (possible substitution)"],
+                "What is actually in the bags (demo control)",
+                ["Material from the declared dump",
+                 "Material substituted from another dump",
+                 "Declared dump, unusually variable sampling"],
             )
-            noise = st.slider("Measurement noise", 0.5, 2.0, 1.0, 0.1,
-                               help="Higher noise widens natural variation in the simulated lab reading.")
+            noise = st.slider("Sampling variation", 0.5, 2.0, 1.0, 0.1,
+                              help="Widens natural spread in the simulated assay. Genuine material "
+                                   "still passes at 1.0 about 99 times in 100.")
             run = st.button("Run geochemical scan", type="primary")
 
         if run:
-            suspicious = mode.startswith("Simulate a suspicious")
-            sample = draw_sample(dump_choice, suspicious=suspicious, noise=noise)
-            score, z = anomaly_score(dump_choice, sample)
+            if mode.startswith("Material substituted"):
+                source = pick_substitute_source(row["dump_name"])
+                applied_noise = noise
+            elif mode.startswith("Declared dump, unusually"):
+                source = row["dump_name"]
+                applied_noise = max(noise, 1.8)
+            else:
+                source = row["dump_name"]
+                applied_noise = noise
+
+            sample = draw_sample(source, noise=applied_noise)
+            score, z = anomaly_score(row["dump_name"], sample)
 
             with col2:
                 st.markdown("#### Scan result")
                 gauge = go.Figure(go.Indicator(
                     mode="gauge+number",
                     value=score,
-                    number={"suffix": " sigma", "font": {"color": INK}},
+                    number={"font": {"color": INK}},
+                    title={"text": "Profile distance", "font": {"size": 13, "color": INK_SOFT}},
                     gauge={
-                        "axis": {"range": [0, 6], "tickcolor": INK},
+                        "axis": {"range": [0, 8], "tickcolor": INK},
                         "bar": {"color": RUST},
                         "bgcolor": PANEL,
                         "steps": [
                             {"range": [0, FLAG_THRESHOLD], "color": "#CFDCC6"},
-                            {"range": [FLAG_THRESHOLD, 6], "color": "#DDC3BB"},
+                            {"range": [FLAG_THRESHOLD, 8], "color": "#DDC3BB"},
                         ],
                         "threshold": {"line": {"color": ALERT, "width": 3}, "value": FLAG_THRESHOLD},
                     },
                 ))
-                gauge.update_layout(height=220, margin=dict(l=20, r=20, t=10, b=10),
-                                     paper_bgcolor=BG, font_color=INK)
-                st.plotly_chart(gauge, use_container_width=True)
+                gauge.update_layout(height=240, margin=dict(l=20, r=20, t=40, b=10),
+                                    paper_bgcolor=BG, font_color=INK)
+                st.plotly_chart(gauge, width="stretch")
+                st.caption(f"A genuine haul averages {CHI6_MEAN}. Review starts above {FLAG_THRESHOLD}.")
 
             z_df = pd.DataFrame({
                 "Feature": [FEATURE_LABELS[f] for f in FEATURES],
-                "z-score": [z[f] for f in FEATURES],
+                "Deviation": [abs(z[f]) for f in FEATURES],
+                "Direction": ["above reference" if z[f] >= 0 else "below reference" for f in FEATURES],
             })
-            fig = px.bar(z_df, x="Feature", y="z-score", color="z-score",
-                         color_continuous_scale=[MOSS, OCHRE, ALERT])
-            fig.add_hline(y=FLAG_THRESHOLD, line_dash="dash", line_color=ALERT)
-            fig.add_hline(y=-FLAG_THRESHOLD, line_dash="dash", line_color=ALERT)
-            fig.update_layout(paper_bgcolor=BG, plot_bgcolor=BG, font_color=INK, height=320)
-            st.plotly_chart(fig, use_container_width=True)
+            fig = px.bar(z_df, x="Feature", y="Deviation", color="Deviation", custom_data=["Direction"],
+                         color_continuous_scale=[MOSS_FILL, OCHRE_FILL, ALERT])
+            fig.update_traces(hovertemplate="%{x}<br/>%{y:.2f} sigma %{customdata[0]}<extra></extra>")
+            fig.add_hline(y=PER_FEATURE_FLAG, line_dash="dash", line_color=ALERT,
+                          annotation_text=f"single-element limit ({PER_FEATURE_FLAG} sigma)")
+            fig.update_layout(yaxis_title="Deviation from reference (absolute sigma)")
+            st.plotly_chart(theme.base_layout(fig, 340), width="stretch")
+            st.caption("Distance from the reference profile in either direction counts the same. "
+                       "Material that is unusually low in arsenic is as odd as material that is unusually high.")
 
-            batch_id = record_batch(dump_choice, weight, sample)
-            st.session_state["_last_scan"] = batch_id
+            scan_batch(batch_id, sample, source)
 
+# ---------------------------------------------------------------------------
 # OFFICER REVIEW QUEUE
+# ---------------------------------------------------------------------------
 
-elif page == "Officer Review Queue":
-    st.markdown("<div class='eyebrow'>Human-in-the-loop</div>", unsafe_allow_html=True)
-    st.title("Officer Review Queue")
-    st.caption("Flagged batches wait here for human judgement — the site controller's leverage was fear "
-               "and speed; this queue preserves worker trust by never rejecting outright.")
+elif page == "Officer review queue":
+    theme.page_header("Human in the loop", "Officer review queue", "review")
+    st.caption("The site controller's leverage was fear and speed. This queue is the opposite: "
+               "a named person looks at the numbers, records why, and the member can dispute it.")
 
-    queue = batches[batches["status"] == "Officer Review"]
+    queue = batches[batches["status"].isin(["Officer Review", "Disputed"])] if len(batches) else batches
     if not len(queue):
-        st.success("Queue is empty. No batches currently need officer review.")
+        st.success("Nothing waiting. Every scanned haul has cleared or been resolved.")
     else:
         for _, b in queue.iterrows():
             with st.container(border=True):
                 c1, c2 = st.columns([2, 1])
                 with c1:
-                    st.markdown(f"**{b['batch_id']}** · {b['dump_name']} · {b['weight_kg']} kg &nbsp; "
-                                f"{status_tag(b['status'])} &nbsp; "
-                                f"<span style='font-family:IBM Plex Mono, monospace; color:{INK_SOFT}; font-size:0.8rem;'>score {b['anomaly_score']}</span>",
-                                unsafe_allow_html=True)
-                    st.caption(f"Collected {b['collected_at']}")
-                    sample_df = pd.DataFrame({
+                    st.markdown(
+                        f"**{b['batch_id']}** &nbsp; {b['dump_name']} &nbsp; {b['tonnes']} t &nbsp; "
+                        f"{status_tag(b['status'])} &nbsp; "
+                        f"<span style='font-family:IBM Plex Mono,monospace;color:{INK_SOFT};font-size:0.8rem;'>"
+                        f"score {b['anomaly_score']} of {FLAG_THRESHOLD}</span>",
+                        unsafe_allow_html=True)
+                    st.caption(f"Logged by {b['member_name']} | {b['section']} | "
+                               f"worked {b['extracted_from']} to {b['extracted_to']}")
+                    if b["officer_note"]:
+                        st.warning(b["officer_note"])
+                    comparison = pd.DataFrame({
                         "Feature": [FEATURE_LABELS[f] for f in FEATURES],
-                        "Measured": [round(b[f], 3) for f in FEATURES],
-                        "Reference mean": [st.session_state.dump_profiles[b["dump_name"]][f]["mean"] for f in FEATURES],
+                        "Measured": [round(float(b[f]), 3) if pd.notna(b[f]) else None for f in FEATURES],
+                        "Reference": [st.session_state.dump_profiles[b["dump_name"]][f]["mean"] for f in FEATURES],
+                        "Sigma out": [
+                            round(abs(float(b[f]) - st.session_state.dump_profiles[b["dump_name"]][f]["mean"])
+                                  / st.session_state.dump_profiles[b["dump_name"]][f]["std"], 2)
+                            if pd.notna(b[f]) else None for f in FEATURES
+                        ],
                     })
-                    st.dataframe(sample_df, use_container_width=True, hide_index=True)
-                    note = st.text_input("Officer note", key=f"note_{b['batch_id']}")
+                    st.dataframe(comparison, width="stretch", hide_index=True)
+                    note = st.text_input("Officer note", key=f"note_{b['batch_id']}",
+                                         placeholder="What did you check, and what did you find?")
+                    reason = st.selectbox("If rejecting, why", REJECT_REASONS, key=f"reason_{b['batch_id']}")
                 with c2:
                     st.write("")
-                    if st.button("Approve — issue Gold Pass", key=f"approve_{b['batch_id']}"):
-                        idx = batches[batches["batch_id"] == b["batch_id"]].index[0]
-                        au_grams = b["weight_kg"] * 1000 * (b["au_gt"] / 1000.0)
-                        recovered_g = au_grams * 0.85
-                        payout = round(recovered_g * st.session_state.spot_price_zar_per_g * 0.85, 2)
-                        st.session_state.batches.loc[idx, "status"] = "Gold Pass Issued"
-                        st.session_state.batches.loc[idx, "officer_note"] = note or "Approved after manual review."
-                        st.session_state.batches.loc[idx, "payout_zar"] = payout
+                    if st.button("Clear and issue Gold Pass", key=f"approve_{b['batch_id']}"):
+                        payout = compute_payout(b["tonnes"], b["au_gt"], st.session_state.spot_price_zar_per_g)
+                        update_batch(b["batch_id"], status="Gold Pass Issued",
+                                     officer_note=note or "Cleared after manual review.", **payout)
                         st.rerun()
-                    if st.button("Reject batch", key=f"reject_{b['batch_id']}"):
-                        idx = batches[batches["batch_id"] == b["batch_id"]].index[0]
-                        st.session_state.batches.loc[idx, "status"] = "Rejected"
-                        st.session_state.batches.loc[idx, "officer_note"] = note or "Rejected after manual review."
+                    if st.button("Send for a second sample", key=f"dispute_{b['batch_id']}"):
+                        update_batch(b["batch_id"], status="Awaiting Scan",
+                                     officer_note=note or "Member disputed the result. Re-sampling requested.",
+                                     anomaly_score=None)
                         st.rerun()
+                    if st.button("Reject with reason", key=f"reject_{b['batch_id']}"):
+                        update_batch(b["batch_id"], status="Rejected", reject_reason=reason,
+                                     officer_note=note or "Rejected after manual review.")
+                        st.rerun()
+                    st.caption("Rejection is recorded against a reason code and is visible to the member "
+                               "on their receipt.")
 
+# ---------------------------------------------------------------------------
+# 04 ERGO VERIFICATION AND SALE
+# ---------------------------------------------------------------------------
 
-# ERGO VERIFICATION & SALE
+elif page == "04 Ergo verification and sale":
+    theme.page_header("Stage 04 / Sell", "Ergo verification and sale", "ergo")
+    theme.process_ribbon("04")
+    st.caption("Ergo takes its own sample on arrival and tests it against the same reference profile. "
+               "It is a genuinely independent check, so it catches material swapped between the "
+               "collection point and the plant gate. Payment follows the same day.")
 
-elif page == "Ergo Verification & Sale":
-    st.markdown("<div class='eyebrow'>Stage 04 · Sell</div>", unsafe_allow_html=True)
-    st.title("Ergo Verification and Sale")
-    st.caption("The same test is repeated on arrival, independently. Only then does same-day mobile "
-               "money go to the cooperative.")
-
-    ready = batches[batches["status"] == "Gold Pass Issued"]
+    ready = batches[batches["status"] == "Gold Pass Issued"] if len(batches) else batches
     if not len(ready):
-        st.info("No batches currently awaiting Ergo verification.")
+        st.info("Nothing waiting for Ergo. Clear a haul at the collection point first.")
     else:
         for _, b in ready.iterrows():
             with st.container(border=True):
                 c1, c2 = st.columns([2, 1])
                 with c1:
-                    st.markdown(f"**{b['batch_id']}** · {b['dump_name']} · {b['weight_kg']} kg &nbsp; {status_tag(b['status'])}",
-                                unsafe_allow_html=True)
-                    st.caption(f"Collected {b['collected_at']} · Estimated payout R {b['payout_zar']:,.2f}")
+                    st.markdown(f"**{b['batch_id']}** &nbsp; {b['dump_name']} &nbsp; {b['tonnes']} t &nbsp; "
+                                f"{status_tag(b['status'])}", unsafe_allow_html=True)
+                    st.caption(f"Logged by {b['member_name']} | scanned {b['scanned_at']}")
+                    breakdown = pd.DataFrame([
+                        ["Contained gold", f"{b['contained_g']:.3f} g"],
+                        [f"Recovered at {RECOVERY_RATE:.0%}", f"{b['recovered_g']:.3f} g"],
+                        ["Gross at spot", money(b["gross_zar"])],
+                        [f"Cooperative payment at {PRICE_SHARE:.0%}", money(b["payout_zar"])],
+                        [f"Cooperative fund levy at {COOP_LEVY:.0%}", f"- {money(b['levy_zar'])}"],
+                        ["To the member", money(b["member_zar"])],
+                    ], columns=["Line", "Amount"])
+                    st.dataframe(breakdown, width="stretch", hide_index=True)
                 with c2:
-                    if st.button("Run independent re-test and release payment", key=f"ergo_{b['batch_id']}"):
-                        rng = np.random.default_rng()
-                        original_sample = {f: b[f] for f in FEATURES}
-                        retest = {f: float(rng.normal(original_sample[f], abs(original_sample[f]) * 0.03))
-                                  for f in FEATURES}
-                        diff = np.sqrt(sum(((retest[f] - original_sample[f]) / (abs(original_sample[f]) + 1e-6)) ** 2
-                                            for f in FEATURES))
-                        idx = batches[batches["batch_id"] == b["batch_id"]].index[0]
-                        with st.spinner("Ergo lab re-testing batch independently..."):
-                            pass
-                        if diff < 0.15:
-                            st.session_state.batches.loc[idx, "status"] = "Verified & Sold"
-                            st.session_state.batches.loc[idx, "resale_check"] = f"Consistent (delta={diff:.3f})"
-                            st.session_state.batches.loc[idx, "sold_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-                            st.success(f"Independently confirmed. Same-day mobile money of "
-                                       f"R {b['payout_zar']:,.2f} released to the cooperative.")
+                    st.write("")
+                    if st.button("Take arrival sample and pay", key=f"ergo_{b['batch_id']}"):
+                        # Fresh draw from whatever the material ACTUALLY is, scored against
+                        # the declared dump. The old version compared the retest to the first
+                        # reading, which meant it could never catch a swap.
+                        retest = draw_sample(b["true_source"] or b["dump_name"])
+                        score, _ = anomaly_score(b["dump_name"], retest)
+                        if score <= FLAG_THRESHOLD:
+                            update_batch(b["batch_id"], status="Verified and Sold",
+                                         ergo_check=f"Independent arrival sample consistent (score {score:.2f})",
+                                         sold_at=datetime.now().strftime("%Y-%m-%d %H:%M"))
+                            st.success(f"Confirmed independently. {money(b['member_zar'])} sent to "
+                                       f"{b['member_name']} today, {money(b['levy_zar'])} to the cooperative fund.")
                         else:
-                            st.session_state.batches.loc[idx, "status"] = "Officer Review"
-                            st.session_state.batches.loc[idx, "resale_check"] = f"Inconsistent (delta={diff:.3f})"
-                            st.session_state.batches.loc[idx, "officer_note"] = "Sent back to review: Ergo re-test diverged from collection-point sample."
-                            st.error("Re-test diverged from the original sample — batch sent back to officer review.")
+                            update_batch(b["batch_id"], status="Officer Review",
+                                         ergo_check=f"Arrival sample inconsistent (score {score:.2f})",
+                                         officer_note="Ergo's arrival sample does not match the reference "
+                                                      "profile. Check custody between collection and plant.")
+                            st.error("Arrival sample does not match. Sent back to officer review.")
                         st.rerun()
 
-    st.markdown("### Recently verified and sold")
-    sold = batches[batches["status"] == "Verified & Sold"].sort_values("sold_at", ascending=False)
+    st.markdown("### Verified and sold")
+    sold = batches[batches["status"] == "Verified and Sold"] if len(batches) else batches
     if len(sold):
-        st.dataframe(
-            sold[["batch_id", "dump_name", "weight_kg", "payout_zar", "resale_check", "sold_at"]],
-            use_container_width=True, hide_index=True,
-        )
+        view = sold.sort_values("sold_at", ascending=False)[
+            ["batch_id", "dump_name", "member_name", "tonnes", "recovered_g",
+             "member_zar", "ergo_check", "sold_at"]].copy()
+        view.columns = ["Batch", "Dump", "Member", "Tonnes", "Gold (g)", "Paid to member (ZAR)", "Arrival check", "Sold"]
+        st.dataframe(view, width="stretch", hide_index=True)
     else:
-        st.caption("No batches verified and sold yet.")
+        st.caption("Nothing sold yet.")
 
+# ---------------------------------------------------------------------------
+# MEMBER RECEIPT
+# ---------------------------------------------------------------------------
 
+elif page == auth.RECEIPT_PAGE:
+    theme.page_header("Staff view", "Print a worker receipt", "receipt")
+    st.caption("This is the staff-side view of what gets printed at the collection point and handed "
+               "over, then sent by SMS so it survives a lost phone. It is not a login, and the "
+               "worker never sees this screen. Trust runs both ways: the paper in their hand is "
+               "what makes the record theirs as well as ours.")
+
+    if not len(members):
+        st.warning("No members yet.")
+    else:
+        options = {f"{r['name']} | {r['dump_name']}": r["member_id"] for _, r in members.iterrows()}
+        pick = st.selectbox("Member", list(options.keys()))
+        member_id = options[pick]
+        member = members[members["member_id"] == member_id].iloc[0]
+        mine = batches[batches["member_id"] == member_id] if len(batches) else batches
+
+        a, b_, c = st.columns(3)
+        a.metric("Hauls logged", len(mine))
+        b_.metric("Tonnes delivered", f"{mine['tonnes'].fillna(0).sum():,.1f}" if len(mine) else "0")
+        c.metric("Paid to date", money(mine["member_zar"].dropna().sum() if len(mine) else 0))
+
+        if len(mine):
+            latest = mine.sort_values("logged_at", ascending=False).iloc[0]
+            coop_row = dumps[dumps["dump_name"] == latest["dump_name"]]
+            coop_no = coop_row.iloc[0]["cooperative_no"] if len(coop_row) else "n/a"
+            paid = money(latest["member_zar"]) if pd.notna(latest["member_zar"]) else "not yet paid"
+            reason = f"\nReason        {latest['reject_reason']}" if latest["reject_reason"] else ""
+            st.markdown("#### Latest receipt")
+            st.markdown(
+                f"<div class='receipt'>MINERAL GLEANING RIGHTS\n"
+                f"{latest['dump_name']} cooperative | {coop_no}\n"
+                f"{'-' * 44}\n"
+                f"Batch         {latest['batch_id']}\n"
+                f"Member        {member['name']} ({member['member_id']})\n"
+                f"Block         {latest['section']}\n"
+                f"Worked        {latest['extracted_from']} to {latest['extracted_to']}\n"
+                f"Delivered     {latest['tonnes']} tonnes\n"
+                f"Status        {latest['status']}{reason}\n"
+                f"Paid to you   {paid}\n"
+                f"{'-' * 44}\n"
+                f"Query this batch: dial *134*GOLD# and enter {latest['batch_id'][-6:]}</div>",
+                unsafe_allow_html=True,
+            )
+            st.caption("The USSD line matters. It means a member can check a batch from a feature phone "
+                       "with no data, and it means the record is not only in the buyer's hands.")
+
+            st.markdown("#### Full history")
+            view = mine.sort_values("logged_at", ascending=False)[
+                ["batch_id", "dump_name", "tonnes", "status", "member_zar", "logged_at", "sold_at"]].copy()
+            view.columns = ["Batch", "Dump", "Tonnes", "Status", "Paid (ZAR)", "Logged", "Sold"]
+            st.dataframe(view, width="stretch", hide_index=True)
+        else:
+            st.info(f"{member['name']} has not logged a haul yet.")
+
+# ---------------------------------------------------------------------------
 # ANALYTICS
+# ---------------------------------------------------------------------------
 
 elif page == "Analytics":
-    st.markdown("<div class='eyebrow'>Validation</div>", unsafe_allow_html=True)
-    st.title("Analytics")
-    st.caption("How incoming batches compare to each dump's declared reference profile.")
+    theme.page_header("Validation", "Analytics", "analytics")
+    st.caption("Whether the system is doing what it claims: catching substitution without "
+               "obstructing honest work.")
 
-    if not len(batches):
-        st.info("No batch data yet.")
+    scanned = batches[batches["anomaly_score"].notna()] if len(batches) else batches
+    if not len(scanned):
+        st.info("No scanned hauls yet.")
     else:
-        dump_pick = st.selectbox("Dump", sorted(batches["dump_name"].unique()))
+        with st.expander("How the review threshold is set", expanded=True):
+            st.markdown(
+                f"""
+The score adds up how far six elements sit from the dump's reference profile, then takes the square
+root. For genuine material that quantity follows a chi distribution with six degrees of freedom, which
+averages **{CHI6_MEAN}**. The threshold of **{FLAG_THRESHOLD}** is its 99th percentile, so roughly
+**one honest haul in a hundred** goes to review.
+
+This is the number to have ready. An earlier draft used 2.75, which would have pulled aside
+**27 percent** of honest deliveries. A system that stops one haul in four feels like an accusation
+no matter how the architecture is described.
+"""
+            )
+
+        dump_pick = st.selectbox("Dump", sorted(scanned["dump_name"].unique()))
         feature_pick = st.selectbox("Feature", FEATURES, format_func=lambda f: FEATURE_LABELS[f])
 
-        sub = batches[batches["dump_name"] == dump_pick].copy()
+        sub = scanned[scanned["dump_name"] == dump_pick].copy()
         profile = st.session_state.dump_profiles[dump_pick][feature_pick]
         mean, std = profile["mean"], profile["std"]
 
         fig = go.Figure()
-        fig.add_hrect(y0=mean - 2 * std, y1=mean + 2 * std, fillcolor=MOSS, opacity=0.15, line_width=0,
-                       annotation_text="expected band (+/-2 sigma)", annotation_position="top left")
-        fig.add_hline(y=mean, line_dash="dot", line_color=OCHRE)
-        colors = sub["status"].map(STATUS_COLORS).fillna(INK_SOFT)
+        fig.add_hrect(y0=mean - 2 * std, y1=mean + 2 * std, fillcolor=MOSS_FILL, opacity=0.15, line_width=0,
+                      annotation_text="expected band (2 sigma)", annotation_position="top left")
+        fig.add_hline(y=mean, line_dash="dot", line_color=OCHRE_FILL)
         fig.add_trace(go.Scatter(
-            x=sub["collected_at"], y=sub[feature_pick], mode="markers",
-            marker=dict(size=12, color=colors, line=dict(width=1, color=INK)),
-            text=sub["batch_id"] + " · " + sub["status"],
+            x=sub["scanned_at"], y=sub[feature_pick], mode="markers",
+            marker=dict(size=13, color=sub["status"].map(STATUS_COLORS).fillna(INK_SOFT),
+                        line=dict(width=1, color=INK)),
+            text=sub["batch_id"] + " | " + sub["status"].astype(str),
             hoverinfo="text+y",
         ))
-        fig.update_layout(
-            paper_bgcolor=BG, plot_bgcolor=BG, font_color=INK, height=420,
-            yaxis_title=FEATURE_LABELS[feature_pick], xaxis_title="Batch collected",
-        )
-        st.plotly_chart(fig, use_container_width=True)
+        fig.update_layout(yaxis_title=FEATURE_LABELS[feature_pick], xaxis_title="Scanned")
+        st.plotly_chart(theme.base_layout(fig, 420), width="stretch")
 
-        st.markdown("### Batch status breakdown — all dumps")
-        counts = batches["status"].value_counts().reset_index()
-        counts.columns = ["Status", "Batches"]
-        fig2 = px.bar(counts, x="Status", y="Batches", color="Status",
-                      color_discrete_map=STATUS_COLORS)
-        fig2.update_layout(paper_bgcolor=BG, plot_bgcolor=BG, font_color=INK, height=320, showlegend=False)
-        st.plotly_chart(fig2, use_container_width=True)
+        left, right = st.columns(2)
+        with left:
+            st.markdown("### Outcomes")
+            counts = batches["status"].value_counts().reset_index()
+            counts.columns = ["Status", "Hauls"]
+            fig2 = px.bar(counts, x="Status", y="Hauls", color="Status", color_discrete_map=STATUS_COLORS)
+            fig2.update_layout(showlegend=False)
+            st.plotly_chart(theme.base_layout(fig2, 320), width="stretch")
+        with right:
+            st.markdown("### Score against the review line")
+            trend = scanned.sort_values("scanned_at")
+            fig3 = px.scatter(trend, x="scanned_at", y="anomaly_score", color="dump_name",
+                              color_discrete_sequence=[RUST, OCHRE_FILL, MOSS_FILL, WATER_FILL, INK_SOFT, ALERT])
+            fig3.add_hline(y=FLAG_THRESHOLD, line_dash="dash", line_color=ALERT,
+                           annotation_text="review threshold")
+            fig3.add_hline(y=CHI6_MEAN, line_dash="dot", line_color=INK_SOFT,
+                           annotation_text="typical genuine haul")
+            st.plotly_chart(theme.base_layout(fig3, 320), width="stretch")
 
-        st.markdown("### Anomaly score trend")
-        trend = batches.sort_values("collected_at")
-        fig3 = px.line(trend, x="collected_at", y="anomaly_score", color="dump_name", markers=True,
-                       color_discrete_sequence=[RUST, OCHRE, MOSS, WATER, INK_SOFT, ALERT])
-        fig3.add_hline(y=FLAG_THRESHOLD, line_dash="dash", line_color=ALERT,
-                        annotation_text="officer review threshold")
-        fig3.update_layout(paper_bgcolor=BG, plot_bgcolor=BG, font_color=INK, height=350)
-        st.plotly_chart(fig3, use_container_width=True)
-
+# ---------------------------------------------------------------------------
 # LEDGER
+# ---------------------------------------------------------------------------
 
 elif page == "Ledger":
-    st.markdown("<div class='eyebrow'>Record of account</div>", unsafe_allow_html=True)
-    st.title("Cooperative Ledger")
-    st.caption("Full batch history — every scan, review outcome, and payout.")
+    theme.page_header("Record of account", "Cooperative ledger", "ledger")
+    st.caption("Every haul, who logged it, what the scan found, who decided what, and what was paid.")
 
     if not len(batches):
-        st.info("No batches recorded yet.")
+        st.info("No hauls recorded yet.")
     else:
-        status_filter = st.multiselect(
-            "Filter by status", sorted(batches["status"].unique()), default=list(batches["status"].unique())
-        )
-        display = batches[batches["status"].isin(status_filter)].sort_values("collected_at", ascending=False)
-        display_show = display[[
-            "batch_id", "dump_name", "weight_kg", "au_gt", "anomaly_score",
-            "status", "payout_zar", "collected_at", "sold_at", "officer_note",
-        ]].rename(columns={"au_gt": "Au (g/t)"})
-        st.dataframe(display_show, use_container_width=True, hide_index=True)
+        chosen = st.multiselect("Status", sorted(batches["status"].dropna().unique()),
+                                default=list(batches["status"].dropna().unique()))
+        display = batches[batches["status"].isin(chosen)].sort_values("logged_at", ascending=False)
+        view = display[[
+            "batch_id", "dump_name", "member_name", "tonnes", "section", "au_gt", "anomaly_score",
+            "status", "reject_reason", "recovered_g", "price_used", "payout_zar", "levy_zar",
+            "member_zar", "logged_at", "scanned_at", "sold_at", "officer_note", "ergo_check",
+        ]].rename(columns={
+            "batch_id": "Batch", "dump_name": "Dump", "member_name": "Logged by", "tonnes": "Tonnes",
+            "section": "Block", "au_gt": "Au (g/t)", "anomaly_score": "Score", "status": "Status",
+            "reject_reason": "Reject reason", "recovered_g": "Gold (g)", "price_used": "Price used",
+            "payout_zar": "Co-op payment", "levy_zar": "Levy", "member_zar": "To member",
+            "logged_at": "Logged", "scanned_at": "Scanned", "sold_at": "Sold",
+            "officer_note": "Officer note", "ergo_check": "Arrival check",
+        })
+        st.dataframe(view, width="stretch", hide_index=True)
 
-        csv = display_show.to_csv(index=False).encode("utf-8")
-        st.download_button("Download ledger as CSV", csv, "mineral_gleaning_ledger.csv", "text/csv")
+        a, b_, c = st.columns(3)
+        a.metric("Tonnes in view", f"{display['tonnes'].fillna(0).sum():,.1f}")
+        b_.metric("Paid to members", money(display["member_zar"].dropna().sum()))
+        c.metric("Cooperative fund", money(display["levy_zar"].dropna().sum()))
 
-        total_paid = display["payout_zar"].dropna().sum()
-        st.metric("Total in this filtered view", f"R {total_paid:,.2f}")
+        st.download_button("Download ledger as CSV",
+                           view.to_csv(index=False).encode("utf-8"),
+                           "mineral_gleaning_ledger.csv", "text/csv")
+        st.caption("This CSV is the chain of custody record an OECD due diligence review would ask for: "
+                   "date, place, quantity, participants, and the basis of each decision.")
+
+# ---------------------------------------------------------------------------
+# REGISTER A WORKER
+# ---------------------------------------------------------------------------
+# A worker is registered IN PERSON by a field officer, whose own name is
+# recorded against the registration. That face-to-face check is the social
+# verification layer. Nothing on this page creates an account, sets a password,
+# or gives the person any way to sign in, because they never do.
+
+elif page == auth.WORKER_PAGE:
+    theme.page_header("Stage 00 / Enrol", "Register a worker", "members")
+    st.caption("Registration happens face to face, at the dump. The officer who does it puts their "
+               "own name against the record. That in-person check is the social verification layer, "
+               "and it is the reason a haul can be tied to a real person later.")
+
+    st.info("Workers on the dumps do not sign in and have no password. They are recorded here by "
+            "staff, and "
+            "what they carry away is a printed receipt, an SMS, and the USSD line for checking a batch.")
+
+    if not len(dumps):
+        st.warning("Register a dump first. A worker joins a cooperative at a permitted dump.")
+    else:
+        with st.form("register_worker_form"):
+            c1, c2 = st.columns(2)
+            with c1:
+                rw_name = st.text_input("Full name", placeholder="As it appears on their ID")
+                rw_dump = st.selectbox("Dump and cooperative", dumps["dump_name"].tolist())
+                rw_role = st.selectbox("Role in the cooperative",
+                                       ["Member", "Collection Officer", "Cooperative Chair"])
+            with c2:
+                rw_id = st.text_input("ID or reference number",
+                                      placeholder="SA ID, passport, or cooperative reference")
+                rw_gender = st.selectbox("Gender", ["F", "M", "Other or prefer not to say"])
+                st.text_input("Verified in person by", value=user["name"], disabled=True,
+                              help="Recorded automatically from your signed-in account.")
+            st.caption("By submitting, you confirm you met this person, checked the reference "
+                       "number against their document, and explained how the receipt and USSD "
+                       "line work.")
+            if st.form_submit_button("Register this worker", type="primary"):
+                if not rw_name.strip():
+                    st.error("Enter the worker's full name.")
+                elif not rw_id.strip():
+                    st.error("Enter an ID or reference number. The in-person check is the "
+                             "verification layer, so it has to be recorded.")
+                else:
+                    add_member(rw_name.strip(), rw_dump, rw_role, rw_gender,
+                               id_ref=rw_id.strip(),
+                               verified_by=f"{user['name']} ({auth.ROLES[ROLE].lower()})")
+                    st.rerun()
+
+    st.markdown("### Workers you have registered")
+    mine = members[members["verified_by"].fillna("").str.startswith(user["name"])] \
+        if len(members) else members
+    if len(mine):
+        view = mine[["member_id", "name", "dump_name", "role", "id_ref", "join_date"]].copy()
+        view.columns = ["Worker ID", "Name", "Dump", "Role", "ID or reference", "Registered"]
+        st.dataframe(view, width="stretch", hide_index=True)
+    else:
+        st.caption("Nothing yet. Workers you register will appear here.")
+
+elif page == auth.ACCOUNTS_PAGE:
+    auth.render_accounts_page(user)
+
+theme.site_footer()
+
+# ---------------------------------------------------------------------------
+# NOTES FOR THE TEAM
+# ---------------------------------------------------------------------------
+# 1. LEADERSHIP_TARGET is set to 30% and attributed to nobody. The first version of this app
+#    credited it to the African Mining Vision. Confirm that before it goes in front of the World
+#    Gold Council. South Africa's Mining Charter is the likelier source for a hard number.
+# 2. "AI anomaly scan" in the deck describes what is implemented here as a statistical comparison
+#    against a geochemical reference profile. "Geochemical fingerprint check" is more accurate and
+#    much easier to defend under questioning.
+# 3. Session state resets on refresh. Fine for a demo. Say so if a judge asks about persistence.
+# 4. Uranium is in the feature set because Witwatersrand tailings are uraniferous. That is a real
+#    credibility hook and also a real health question the solution should have an answer for.

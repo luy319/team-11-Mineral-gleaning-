@@ -1,0 +1,7 @@
+# Staff credentials and live sign-in tokens. Generated at runtime, never committed.
+accounts.json
+sessions.json
+
+venv/
+__pycache__/
+*.pyc
