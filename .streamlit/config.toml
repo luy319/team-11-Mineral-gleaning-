@@ -1,0 +1,20 @@
+# This file must live at .streamlit/config.toml, beside app.py. It was previously sitting at the
+# repo root as streamlit_config.toml, where Streamlit never read it.
+# This is what fixes the background colour properly. CSS alone cannot reach the top header bar
+# or the dropdown menus, because those render outside the .stApp container.
+
+[theme]
+base = "light"
+primaryColor = "#8F4620"
+backgroundColor = "#EAE2CC"
+secondaryBackgroundColor = "#DED2AF"
+textColor = "#26211A"
+font = "sans serif"
+
+[server]
+headless = true
+# Serves ./static at app/static/, which is how the bundled fonts load.
+enableStaticServing = true
+
+[browser]
+gatherUsageStats = false
