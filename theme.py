@@ -1,18 +1,4 @@
-"""
-Palette, stylesheet and illustration engine, shared by the public landing page
-and the signed-in portal.
 
-Every image in this project is drawn here, in code, as inline SVG. Nothing is
-fetched over the network and nothing is read off disk, so the app renders
-identically on a venue projector with no wifi and there is no image licence to
-explain to anybody. The scenes mix from the palette constants below, which is
-the reason they sit on the sand background instead of looking pasted onto it.
-
-The subject matter is deliberate: aerial tailings dumps, terraces, haul roads,
-a headgear on the horizon. Landscape and plant, never people. A project about
-dignity in artisanal mining should not use a photograph of a miner as wallpaper,
-so workers and staff appear as generated initials rather than stock faces.
-"""
 
 import hashlib
 import itertools
@@ -1184,12 +1170,35 @@ def demo_credentials_panel(demo_accounts, role_labels):
 
 HAS_NEW_MAP = hasattr(px, "scatter_map")
 
+# East Rand fallback centre, used whenever the dumps being plotted don't give
+# us a usable lat/lon average (empty frame, all-NaN column, or a stray 0,0
+# default from an incomplete registration). Without this fallback, a single
+# bad row can pull the mean toward the Gulf of Guinea and the map zooms out
+# to the whole world to fit it.
+EAST_RAND_CENTER = {"lat": -26.23, "lon": 28.38}
+
+
+def _map_center(df):
+    """Best-effort centre point for the map. Falls back to a fixed East Rand
+    coordinate if the data can't provide a sane average (see note above)."""
+    try:
+        lat = df["lat"].astype(float)
+        lon = df["lon"].astype(float)
+        lat = lat[(lat != 0) | (lon != 0)]
+        lon = lon[lat.index]
+        if len(lat) == 0:
+            return EAST_RAND_CENTER
+        return {"lat": float(lat.mean()), "lon": float(lon.mean())}
+    except Exception:
+        return EAST_RAND_CENTER
+
 
 def render_map(df, size_col=None):
     kwargs = dict(
         lat="lat", lon="lon", hover_name="dump_name",
         hover_data={"permit_no": True, "hauls": True, "lat": False, "lon": False},
         zoom=9.2,
+        center=_map_center(df),
     )
     if size_col:
         kwargs.update(size=size_col, size_max=26)
