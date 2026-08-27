@@ -1,4 +1,18 @@
+"""
+Palette, stylesheet and illustration engine, shared by the public landing page
+and the signed-in portal.
 
+Every image in this project is drawn here, in code, as inline SVG. Nothing is
+fetched over the network and nothing is read off disk, so the app renders
+identically on a venue projector with no wifi and there is no image licence to
+explain to anybody. The scenes mix from the palette constants below, which is
+the reason they sit on the sand background instead of looking pasted onto it.
+
+The subject matter is deliberate: aerial tailings dumps, terraces, haul roads,
+a headgear on the horizon. Landscape and plant, never people. A project about
+dignity in artisanal mining should not use a photograph of a miner as wallpaper,
+so workers and staff appear as generated initials rather than stock faces.
+"""
 
 import hashlib
 import itertools
@@ -1194,23 +1208,34 @@ def _map_center(df):
 
 
 def render_map(df, size_col=None):
+    # zoom/center are deliberately NOT passed into the px constructor here.
+    # Depending on the installed Plotly version, px.scatter_map (the newer,
+    # MapLibre-based trace) does not reliably honour "zoom"/"center" passed as
+    # constructor kwargs the way the older px.scatter_mapbox did — they can be
+    # silently dropped, which is what produced the whole-world view even after
+    # they were set. Forcing style + center + zoom together in a single
+    # update_layout call, on the actual layout object, is the version-proof way
+    # to do it.
     kwargs = dict(
         lat="lat", lon="lon", hover_name="dump_name",
         hover_data={"permit_no": True, "hauls": True, "lat": False, "lon": False},
-        zoom=9.2,
-        center=_map_center(df),
     )
     if size_col:
         kwargs.update(size=size_col, size_max=26)
+
+    center = _map_center(df)
+
     if HAS_NEW_MAP:
         fig = px.scatter_map(df, **kwargs)
-        fig.update_layout(map_style="carto-positron")
+        fig.update_layout(map=dict(style="carto-positron", center=center, zoom=9.2))
     else:
         fig = px.scatter_mapbox(df, **kwargs)
-        fig.update_layout(mapbox_style="carto-positron")
+        fig.update_layout(mapbox=dict(style="carto-positron", center=center, zoom=9.2))
+
     fig.update_traces(marker=dict(color=RUST))
     fig.update_layout(paper_bgcolor=BG, plot_bgcolor=BG, font_color=INK,
-                      margin=dict(l=0, r=0, t=0, b=0), height=420)
+                      margin=dict(l=0, r=0, t=0, b=0), height=420,
+                      uirevision="mgr-map")  # keeps manual zoom/pan across reruns
     return fig
 
 
