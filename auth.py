@@ -14,14 +14,22 @@ WHO DOES NOT
 
 APPROVAL
     Sign-up is open, but a new account lands as "pending" with role None and can
-    reach nothing. An administrator assigns a role before the portal opens. An
-    open self-signup that could immediately register a dump into a gold
-    traceability system would not be defensible, so the wait is shown plainly.
+    reach nothing. An administrator assigns a role before the portal opens, either
+    by approving a pending request or by adding the account directly. An open
+    self-signup that could immediately register a dump into a gold traceability
+    system would not be defensible, so the wait is shown plainly.
 
 SESSIONS
     A signed-in browser carries an opaque token in the URL query string, matched
     against sessions.json. That is what survives a refresh; Streamlit session
     state alone does not, because a refresh starts a new session.
+
+ACCESS CONTROL
+    Two layers, on purpose. ROLE_PAGES decides what appears in the sidebar, so a
+    role never even sees a page it cannot use. can_open() is checked again right
+    before a page renders, so a role change made mid-session (an administrator
+    demoting or reassigning someone) cannot leave a stale, over-privileged page
+    on screen. Neither layer trusts the other.
 """
 
 import hashlib
@@ -78,7 +86,8 @@ ALL_PAGES = [
 ]
 
 # What each role can open. Pages outside this list are not rendered in the nav
-# at all, rather than shown and then refused.
+# at all, rather than shown and then refused. A field officer, for example, has
+# no route to "Officer review queue" or "Ledger" no matter what they click.
 ROLE_PAGES = {
     "field_officer": [
         DASHBOARD, WORKER_PAGE, "02 Extract and log a haul",
@@ -102,9 +111,8 @@ DEMO_ACCOUNTS = [
 ]
 
 PROTOTYPE_NOTE = (
-    "Prototype sign-in. Passwords are salted and hashed, but this is not production "
-    "authentication: there is no rate limiting, no email verification, and the session "
-    "token travels in the URL."
+    "Prototype sign-in: passwords are salted and hashed, but there is no rate "
+    "limiting or email verification."
 )
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -185,6 +193,41 @@ def create_account(email, name, password):
     }
     store.save_accounts(accounts)
     return True, "Request received. An administrator has to approve this account and assign a role."
+
+
+def create_account_direct(email, name, password, role, created_by):
+    """Administrator-initiated account creation. Skips the pending step:
+    the account is active with a role the moment it is created. This is the
+    path for onboarding a real new staff member without making them fill in
+    their own sign-up form first, or for demo purposes where an admin wants
+    to hand someone working credentials on the spot."""
+    email = (email or "").strip().lower()
+    name = (name or "").strip()
+    if not name:
+        return False, "Enter a full name."
+    if not EMAIL_RE.match(email):
+        return False, "Enter a valid work email address."
+    if len(password or "") < 8:
+        return False, "Choose a password of at least 8 characters."
+    if role not in ROLES:
+        return False, "Choose a valid role."
+    accounts = store.load_accounts()
+    if email in accounts:
+        return False, "An account already exists for that email address."
+    salt, digest = hash_password(password)
+    accounts[email] = {
+        "email": email,
+        "name": name,
+        "salt": salt,
+        "hash": digest,
+        "role": role,
+        "status": "active",
+        "created": datetime.now().isoformat(timespec="seconds"),
+        "approved_by": created_by,
+        "approved_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    store.save_accounts(accounts)
+    return True, f"{name} added as {ROLES[role]}. They can sign in immediately with the password you set."
 
 
 def set_role(email, role, approved_by):
@@ -321,9 +364,7 @@ def _back_to_landing():
 
 def render_sign_in():
     theme.page_header("Staff access", "Sign in", "review")
-    st.caption("For Mineral Gleaning Rights staff. The workers on the dumps do not sign in and "
-               "have no password. "
-               "They are registered in person by a field officer and hold a printed receipt.")
+    st.caption("Staff only. Workers on the dumps do not sign in.")
 
     left, right = st.columns([1, 1])
     with left:
@@ -345,8 +386,7 @@ def render_sign_in():
 
 def render_sign_up():
     theme.page_header("Staff access", "Request staff access", "members")
-    st.caption("Anyone can ask. Nobody gets in until an administrator approves the account and "
-               "assigns a role. Until then the account can reach nothing.")
+    st.caption("An administrator assigns your role before the portal opens.")
 
     with st.form("sign_up_form"):
         c1, c2 = st.columns(2)
@@ -362,25 +402,14 @@ def render_sign_up():
             else:
                 ok, message = create_account(email, name, password)
                 (st.success if ok else st.error)(message)
-                if ok:
-                    st.info("An administrator will assign your role. Sign in after that to reach the portal.")
     _back_to_landing()
     st.caption(PROTOTYPE_NOTE)
 
 
 def render_pending(user):
-    """Signed in, approved for nothing. Acceptance criterion 2 lands here."""
+    """Signed in, approved for nothing."""
     theme.page_header("Awaiting approval", "Your account is pending", "review")
-    st.warning(f"{user['name']}, your account exists but no role has been assigned yet. "
-               "An administrator has to approve it before any part of the portal opens.")
-    st.caption("This step is deliberate. An account that could register a dump into a gold "
-               "traceability system the moment it was created would not be defensible.")
-    st.markdown("#### What happens next")
-    st.markdown(
-        "1. An administrator opens **Staff accounts** and sees your request.\n"
-        "2. They assign the role that matches your job.\n"
-        "3. You sign in again and only the pages for that role appear."
-    )
+    st.warning(f"{user['name']}, an administrator has to assign a role before the portal opens.")
     if st.button("Sign out"):
         sign_out()
         st.rerun()
@@ -404,22 +433,37 @@ def render_account_sidebar(user):
 
 
 def render_accounts_page(user):
-    """The approval queue and role assignment. Lives here rather than in
-    app.py because everything it touches is an account, not a haul."""
+    """The approval queue, direct account creation, and role assignment.
+    Lives here rather than in app.py because everything it touches is an
+    account, not a haul."""
     theme.page_header("Administration", "Staff accounts", "review")
-    st.caption("Sign-up is open, but a new account arrives with no role and can reach nothing. "
-               "Approving it here is what opens the portal, and only for the pages that role needs.")
-
-    st.info("This page governs STAFF accounts only. The workers on the dumps are records in the "
-            "cooperative roster and "
-            "have no account to approve.")
+    st.caption("Every page a role can open is fixed by ROLE_PAGES; approving or adding an "
+               "account here is what turns a role into working access.")
 
     accounts = store.load_accounts()
     waiting = [a for a in accounts.values() if a.get("status") == "pending"]
 
+    # ---- add a new staff account directly ---------------------------------
+    st.markdown("### Add a new staff account")
+    st.caption("Creates the account active with a role right away, no separate sign-up step.")
+    with st.form("add_account_form"):
+        c1, c2 = st.columns(2)
+        new_name = c1.text_input("Full name", key="new_acct_name")
+        new_email = c2.text_input("Work email address", placeholder="name@mgr.org.za", key="new_acct_email")
+        c3, c4 = st.columns(2)
+        new_role = c3.selectbox("Role", list(ROLES.keys()), format_func=lambda r: ROLES[r], key="new_acct_role")
+        new_password = c4.text_input("Temporary password", type="password", key="new_acct_pw",
+                                     help="At least 8 characters. Share it with them directly.")
+        st.caption(ROLE_PURPOSE.get(st.session_state.get("new_acct_role", "field_officer"), ""))
+        if st.form_submit_button("Create account", type="primary"):
+            ok, msg = create_account_direct(new_email, new_name, new_password, new_role, user["email"])
+            (st.success if ok else st.error)(msg)
+            if ok:
+                st.rerun()
+
     st.markdown("### Waiting for approval")
     if not waiting:
-        st.success("No requests waiting.")
+        st.caption("No requests waiting.")
     else:
         for acc in waiting:
             with st.container(border=True):
@@ -435,7 +479,6 @@ def render_accounts_page(user):
                     chosen = st.selectbox(
                         "Assign a role", list(ROLES.keys()),
                         format_func=lambda r: ROLES[r], key=f"role_{acc['email']}")
-                    st.caption(ROLE_PURPOSE[chosen])
                     if st.button("Approve and assign", key=f"approve_{acc['email']}",
                                  type="primary"):
                         ok, msg = set_role(acc["email"], chosen, user["email"])
@@ -478,7 +521,5 @@ def render_accounts_page(user):
             ok, msg = reinstate_account(target, user["email"])
             (st.success if ok else st.error)(msg)
             st.rerun()
-        st.caption("Suspending an account ends any session it has open. You cannot change your "
-                   "own account here.")
 
     st.caption(PROTOTYPE_NOTE)

@@ -1,36 +1,4 @@
-"""
-Mineral Gleaning Rights - Gold Pass Platform
-Team 11 | Track 1: Responsible Sourcing, Data and Traceability
 
-Run with:   streamlit run app.py
-Keep .streamlit/config.toml alongside this file. That config, not the CSS in
-theme.py, is what themes the top header bar and the dropdown menus.
-
-MODULES
-  store.py    accounts.json and sessions.json on disk
-  auth.py     staff credentials, roles, page permissions
-  theme.py    palette, stylesheet, and the inline-SVG illustration engine
-  landing.py  the public page
-  app.py      routing plus the portal pages
-
-TWO POPULATIONS, NEVER CONFLATED
-  Staff sign in. Field officers, verification officers, coordinators, the Ergo
-  liaison, administrators. They are the only people who ever see a login screen.
-
-  Workers on the dumps do not. They are records in the members roster,
-  registered in person by a field officer, and their touchpoints are a printed
-  receipt, an SMS and the USSD line. There is no code path that gives a roster
-  record a credential.
-
-DOMAIN NOTES CARRIED FORWARD
-  1. Batch weight is TONNES, not kilograms.
-  2. FLAG_THRESHOLD is 4.10, the 99th percentile of a chi distribution with six
-     degrees of freedom. It is derived, not guessed.
-  3. compute_payout is the single source of truth for money.
-  4. Ergo re-tests against the dump's reference profile, so it can detect swaps
-     in transit.
-  5. Rejection requires a reason and has a dispute route.
-"""
 
 import hashlib
 import uuid
@@ -42,9 +10,8 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-# ---------------------------------------------------------------------------
 # PAGE CONFIG AND THEME
-# ---------------------------------------------------------------------------
+
 
 st.set_page_config(
     page_title="Mineral Gleaning Rights | Gold Pass",
@@ -67,9 +34,9 @@ theme.inject_css()
 auth.seed_demo_accounts()
 auth.restore_session()
 
-# ---------------------------------------------------------------------------
+
 # DOMAIN CONSTANTS
-# ---------------------------------------------------------------------------
+
 
 FEATURES = ["au_gt", "fe2o3_pct", "sio2_pct", "s_pct", "as_ppm", "u_ppm"]
 FEATURE_LABELS = {
@@ -127,9 +94,8 @@ BATCH_COLUMNS = [
     "payout_zar", "levy_zar", "member_zar", "sold_at", "true_source",
 ]
 
-# ---------------------------------------------------------------------------
 # HELPERS
-# ---------------------------------------------------------------------------
+
 
 
 def make_reference_profile(rng):
@@ -197,6 +163,17 @@ def anomaly_score(declared_dump, sample):
     return float(np.sqrt(sum(v ** 2 for v in z.values()))), z
 
 
+def match_percent(score):
+    """Turns the raw sigma-distance score into a plain 0-100 reading for anyone
+    who is not going to think in standard deviations. Deliberately calibrated
+    so the review threshold always lands at exactly 50%: a perfect match reads
+    100%, the line where a batch gets sent to a person sits at 50%, and a
+    wildly mismatched sample approaches 0%. That is a mental model anyone can
+    use without knowing what a sigma is."""
+    pct = 100.0 * (1.0 - score / (2.0 * FLAG_THRESHOLD))
+    return round(max(0.0, min(100.0, pct)))
+
+
 def permit_status(dump_name, on_date=None):
     row = st.session_state.dumps[st.session_state.dumps["dump_name"] == dump_name]
     if not len(row):
@@ -224,9 +201,9 @@ def update_batch(batch_id, **fields):
         st.session_state.batches.loc[idx, key] = value
 
 
-# ---------------------------------------------------------------------------
+
 # STATE
-# ---------------------------------------------------------------------------
+
 
 SEED_DUMPS = [
     ("Brakpan Central", -26.2308, 28.3629, "RP-GP-2024-0118", 2027),
@@ -406,12 +383,10 @@ def init_state():
 
 init_state()
 
-# ---------------------------------------------------------------------------
+
 # ROUTING GATE
-# ---------------------------------------------------------------------------
-# Signed out, the only thing that renders is the public page and the two forms
-# that lead out of it. Signed in but not yet approved, the only thing that
-# renders is the pending notice. Neither path reaches a portal page.
+
+
 
 user = auth.current_user()
 
@@ -432,9 +407,9 @@ if not auth.is_active(user):
 ROLE = user["role"]
 IS_ADMIN = ROLE == "administrator"
 
-# ---------------------------------------------------------------------------
+
 # SIDEBAR
-# ---------------------------------------------------------------------------
+
 
 batches = st.session_state.batches
 dumps = st.session_state.dumps
@@ -462,6 +437,14 @@ st.sidebar.markdown("---")
 ALLOWED = auth.pages_for(ROLE)
 page = st.sidebar.radio("Navigate", ALLOWED, label_visibility="collapsed")
 
+# Belt-and-suspenders: even though the sidebar only ever offers pages this role
+# is allowed to open, re-check before rendering anything. This is what stops a
+# role change mid-session (an admin demoting someone) from leaving a stale page
+# on screen with the wrong controls.
+if not auth.can_open(user, page):
+    st.error("Your access changed. Pick a page from the list on the left.")
+    st.stop()
+
 auth.render_account_sidebar(user)
 
 st.sidebar.markdown("---")
@@ -469,14 +452,6 @@ st.session_state.spot_price_zar_per_g = st.sidebar.number_input(
     "Gold spot price (ZAR per gram)", min_value=100.0,
     value=float(st.session_state.spot_price_zar_per_g), step=10.0,
 )
-
-with st.sidebar.expander("Model assumptions"):
-    st.caption(f"Plant recovery: {RECOVERY_RATE:.0%} of contained gold")
-    st.caption(f"Cooperative receives {PRICE_SHARE:.0%} of spot. The {1 - PRICE_SHARE:.0%} "
-               "deduction covers assay, haulage and processing.")
-    st.caption(f"Cooperative fund levy: {COOP_LEVY:.0%} of each payment")
-    st.caption(f"Review threshold: score above {FLAG_THRESHOLD}. A genuine batch averages "
-               f"{CHI6_MEAN}, so about {EXPECTED_FALSE_FLAG_RATE:.0%} of honest hauls go to review.")
 
 st.sidebar.caption("Prototype. Simulated assays, not connected to lab equipment.")
 if IS_ADMIN and st.sidebar.button("Reset demo data"):
@@ -488,17 +463,15 @@ if IS_ADMIN and st.sidebar.button("Reset demo data"):
 
 
 
-# ---------------------------------------------------------------------------
+
 # DASHBOARD
-# ---------------------------------------------------------------------------
+
 
 if page == "Dashboard":
     theme.hero_band(
         "Site overview",
         "Mineral Gleaning Rights",
-        "A cooperative traceability model for end-of-life tailings on South Africa's East Rand. "
-        "Every haul is tied to a named member, tested against the geochemistry of the dump it "
-        "was declared from, and paid the same day it clears.",
+        "Cooperative traceability for East Rand tailings, from registered dump to same-day payout.",
     )
     theme.process_ribbon()
 
@@ -514,7 +487,7 @@ if page == "Dashboard":
     paid = batches["payout_zar"].dropna().sum() if len(batches) else 0
     c5.metric("Paid out", money_compact(paid))
 
-    st.markdown("### Registered collection points")
+    st.markdown("### Collection points")
     if len(dumps):
         theme.dump_cards([
             {
@@ -534,25 +507,40 @@ if page == "Dashboard":
         map_df["marker"] = map_df["hauls"] + 1  # a dump with no hauls should still be visible
         st.plotly_chart(theme.render_map(map_df, size_col="marker"), width="stretch")
 
+    if len(members):
+        st.markdown("### Cooperative members")
+        theme.person_cards([
+            {
+                "name": m["name"],
+                "key": m["member_id"],
+                "role": m["role"],
+                "dump_name": m["dump_name"],
+                "tonnes": float(batches[batches["member_id"] == m["member_id"]]["tonnes"]
+                                .fillna(0).sum()) if len(batches) else 0.0,
+                "earned": float(batches[batches["member_id"] == m["member_id"]]["member_zar"]
+                                .dropna().sum()) if len(batches) else 0.0,
+            }
+            for _, m in members.head(6).iterrows()
+        ])
+
     st.markdown("### Recent hauls")
     if len(batches):
-        recent = batches.sort_values("logged_at", ascending=False).head(8)
+        recent = batches.sort_values("logged_at", ascending=False).head(6)
         show = recent[["batch_id", "dump_name", "member_name", "tonnes",
-                       "anomaly_score", "status", "payout_zar", "logged_at"]].copy()
-        show.columns = ["Batch", "Dump", "Logged by", "Tonnes", "Score", "Status", "Payout (ZAR)", "Logged"]
+                       "status", "payout_zar", "logged_at"]].copy()
+        show.columns = ["Batch", "Dump", "Logged by", "Tonnes", "Status", "Payout (ZAR)", "Logged"]
         st.dataframe(show, width="stretch", hide_index=True)
     else:
         st.info("No hauls yet. Start at 02 Extract and log a haul.")
 
-# ---------------------------------------------------------------------------
+
 # 01 REGISTER A DUMP
-# ---------------------------------------------------------------------------
+
 
 elif page == "01 Register a dump":
     theme.page_header("Stage 01 / Register", "Register a dump", "register")
     theme.process_ribbon("01")
-    st.caption("Two things happen here. The residue permit and cooperative registration are recorded, "
-               "and initial sampling builds the geochemical reference profile the dump will be tested against.")
+    st.caption("Records the permit and takes the initial sample that becomes the dump's reference profile.")
 
     with st.form("register_dump_form"):
         col1, col2 = st.columns(2)
@@ -565,8 +553,6 @@ elif page == "01 Register a dump":
             permit_no = st.text_input("Residue stockpile permit number", placeholder="RP-GP-2026-0000")
             permit_expiry = st.date_input("Permit expiry", value=datetime.now().date() + timedelta(days=730))
             coop_no = st.text_input("Cooperative registration number", placeholder="CO-OP 2026/1234/24")
-            st.caption("Fe2O3, SiO2, sulphide S, arsenic and uranium are taken from the same assay "
-                       "and stored as the reference profile.")
         submitted = st.form_submit_button("Register dump", type="primary")
 
     if submitted:
@@ -575,7 +561,7 @@ elif page == "01 Register a dump":
         elif name in st.session_state.dump_profiles:
             st.error(f"{name} is already registered.")
         elif not permit_no:
-            st.error("A residue stockpile permit number is required. Without it a haul cannot be scanned.")
+            st.error("A residue stockpile permit number is required.")
         else:
             profile = make_reference_profile(_rng_for(name))
             profile["au_gt"] = {"mean": round(au_estimate, 3), "std": round(au_estimate * 0.10, 4)}
@@ -589,8 +575,7 @@ elif page == "01 Register a dump":
                     "registered_date": datetime.now().strftime("%Y-%m-%d"),
                 }]),
             ], ignore_index=True)
-            st.success(f"{name} registered. Reference profile built from the initial assay.")
-            st.json({FEATURE_LABELS[f]: profile[f] for f in FEATURES})
+            st.success(f"{name} registered.")
 
     st.markdown("### Registered dumps")
     if len(dumps):
@@ -600,21 +585,16 @@ elif page == "01 Register a dump":
         view.columns = ["Dump", "Permit no.", "Expiry", "Cooperative no.", "Status", "Registered", "Permit check"]
         st.dataframe(view, width="stretch", hide_index=True)
 
-    with st.expander("Reference geochemical profiles"):
-        for d, prof in st.session_state.dump_profiles.items():
-            st.markdown(f"**{d}**")
-            st.dataframe(pd.DataFrame(prof).T.rename(index=FEATURE_LABELS), width="stretch")
 
-# ---------------------------------------------------------------------------
 # COOPERATIVE MEMBERS
-# ---------------------------------------------------------------------------
+
 
 elif page == "Cooperative members":
     theme.page_header("Cooperative roster", "Cooperative members", "members")
-    st.caption("One gleaning permit, one registered dump. People join as a cooperative, not individually.")
+    st.caption("One gleaning permit, one registered dump.")
 
     if not len(dumps):
-        st.warning("Register a dump first. Members are attached to a permitted dump.")
+        st.warning("Register a dump first.")
     else:
         with st.form("add_member_form"):
             c1, c2, c3, c4 = st.columns(4)
@@ -669,23 +649,20 @@ elif page == "Cooperative members":
             b.metric("Share", f"{pct}%",
                      delta="at or above target" if pct >= LEADERSHIP_TARGET * 100 else "below target",
                      delta_color="normal" if pct >= LEADERSHIP_TARGET * 100 else "inverse")
-            st.caption(f"Target of {LEADERSHIP_TARGET:.0%} is set by the team. Confirm the source before "
-                       "citing it on stage. See the note at the bottom of app.py.")
         else:
             st.info("No members yet. Add the first one above.")
 
-# ---------------------------------------------------------------------------
+
 # 02 EXTRACT AND LOG
-# ---------------------------------------------------------------------------
+
 
 elif page == "02 Extract and log a haul":
     theme.page_header("Stage 02 / Extract", "Extract and log a haul", "extract")
     theme.process_ribbon("02")
-    st.caption("Custody starts here. A named member records what they took, from which block, over which days. "
-               "The form works with no signal and uploads when the phone finds one.")
+    st.caption("A named member records what they took. Works offline; uploads when signal returns.")
 
     if not len(members):
-        st.warning("Add cooperative members first. A haul has to belong to someone.")
+        st.warning("Add cooperative members first.")
     else:
         with st.form("log_haul_form"):
             c1, c2 = st.columns(2)
@@ -700,15 +677,12 @@ elif page == "02 Extract and log a haul":
                 who = c1.selectbox("Logged by", list(options.keys()) or ["No members at this dump"])
                 section = c1.text_input("Block or section", value="Block A")
             with c2:
-                tonnes = c2.number_input("Material extracted (tonnes)", min_value=0.10, value=5.00, step=0.25,
-                                         help="At 0.45 g/t, one tonne holds about 0.45 g of gold. "
-                                              "Payments only make sense at tonne scale.")
+                tonnes = c2.number_input("Material extracted (tonnes)", min_value=0.10, value=5.00, step=0.25)
                 days_worked = c2.number_input("Days worked on this haul", min_value=1, value=3, step=1)
                 offline = c2.checkbox("Captured offline, no signal at the dump", value=False)
                 preview = compute_payout(tonnes, st.session_state.dump_profiles[dump_choice]["au_gt"]["mean"],
                                          st.session_state.spot_price_zar_per_g)
-                c2.caption(f"Indicative value at this dump's grade: {money(preview['member_zar'])} to the member "
-                           f"after the {COOP_LEVY:.0%} cooperative levy. Final figure comes from the assay.")
+                c2.caption(f"Indicative payout to the member: {money(preview['member_zar'])}")
             if st.form_submit_button("Log this haul", type="primary"):
                 if not options:
                     st.error("Add a member at this dump before logging a haul.")
@@ -728,23 +702,20 @@ elif page == "02 Extract and log a haul":
         view.columns = ["Batch", "Dump", "Logged by", "Tonnes", "Block", "From", "To", "Sync"]
         st.dataframe(view, width="stretch", hide_index=True)
     else:
-        st.caption("Nothing waiting. Every logged haul has been scanned.")
+        st.caption("Nothing waiting.")
 
-# ---------------------------------------------------------------------------
+
 # 03 COLLECTION POINT SCAN
-# ---------------------------------------------------------------------------
+
 
 elif page == "03 Collection point scan":
     theme.page_header("Stage 03 / Verify", "Collection point", "scan")
     theme.process_ribbon("03")
-    st.caption("The material is sampled and tested against the reference profile of the dump it was "
-               "declared from. A mismatch means the gold does not look like it came from where it says. "
-               "It goes to a person for review. It is never an automatic rejection.")
+    st.caption("A mismatch goes to a person for review. It is never an automatic rejection.")
 
     queue = batches[(batches["status"] == "Awaiting Scan") & (batches["synced"] == True)] if len(batches) else batches
     if not len(queue):
-        st.info("No uploaded hauls waiting to be scanned. Log one at stage 02, or upload the offline queue "
-                "from the sidebar.")
+        st.info("No uploaded hauls waiting to be scanned.")
     else:
         col1, col2 = st.columns([1, 1])
         with col1:
@@ -763,9 +734,7 @@ elif page == "03 Collection point scan":
                  "Material substituted from another dump",
                  "Declared dump, unusually variable sampling"],
             )
-            noise = st.slider("Sampling variation", 0.5, 2.0, 1.0, 0.1,
-                              help="Widens natural spread in the simulated assay. Genuine material "
-                                   "still passes at 1.0 about 99 times in 100.")
+            noise = st.slider("Sampling variation", 0.5, 2.0, 1.0, 0.1)
             run = st.button("Run geochemical scan", type="primary")
 
         if run:
@@ -781,85 +750,77 @@ elif page == "03 Collection point scan":
 
             sample = draw_sample(source, noise=applied_noise)
             score, z = anomaly_score(row["dump_name"], sample)
+            pct = match_percent(score)
+            passed = score <= FLAG_THRESHOLD
 
             with col2:
                 st.markdown("#### Scan result")
-                gauge = go.Figure(go.Indicator(
-                    mode="gauge+number",
-                    value=score,
-                    number={"font": {"color": INK}},
-                    title={"text": "Profile distance", "font": {"size": 13, "color": INK_SOFT}},
-                    gauge={
-                        "axis": {"range": [0, 8], "tickcolor": INK},
-                        "bar": {"color": RUST},
-                        "bgcolor": PANEL,
-                        "steps": [
-                            {"range": [0, FLAG_THRESHOLD], "color": "#CFDCC6"},
-                            {"range": [FLAG_THRESHOLD, 8], "color": "#DDC3BB"},
-                        ],
-                        "threshold": {"line": {"color": ALERT, "width": 3}, "value": FLAG_THRESHOLD},
-                    },
-                ))
-                gauge.update_layout(height=240, margin=dict(l=20, r=20, t=40, b=10),
-                                    paper_bgcolor=BG, font_color=INK)
-                st.plotly_chart(gauge, width="stretch")
-                st.caption(f"A genuine haul averages {CHI6_MEAN}. Review starts above {FLAG_THRESHOLD}.")
+                verdict_color = MOSS if passed else OCHRE
+                verdict_text = "MATCHES DECLARED DUMP" if passed else "NEEDS OFFICER REVIEW"
+                st.markdown(
+                    f"<div style='border:1px solid {verdict_color};padding:16px 18px;"
+                    f"background:{'#DCE7D3' if passed else '#EFE1C0'}'>"
+                    f"<div style='font-family:IBM Plex Mono,monospace;font-size:0.72rem;"
+                    f"text-transform:uppercase;letter-spacing:0.08em;color:{verdict_color}'>"
+                    f"{verdict_text}</div>"
+                    f"<div style='font-family:Fraunces,serif;font-size:2.1rem;font-weight:600;"
+                    f"color:{INK};margin-top:4px'>{pct}% match</div>"
+                    f"<div style='font-size:0.82rem;color:{INK_SOFT};margin-top:2px'>"
+                    f"{'Cleared automatically.' if passed else 'Sent to a person, not rejected.'}</div>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
 
-            z_df = pd.DataFrame({
-                "Feature": [FEATURE_LABELS[f] for f in FEATURES],
-                "Deviation": [abs(z[f]) for f in FEATURES],
-                "Direction": ["above reference" if z[f] >= 0 else "below reference" for f in FEATURES],
-            })
-            fig = px.bar(z_df, x="Feature", y="Deviation", color="Deviation", custom_data=["Direction"],
-                         color_continuous_scale=[MOSS_FILL, OCHRE_FILL, ALERT])
-            fig.update_traces(hovertemplate="%{x}<br/>%{y:.2f} sigma %{customdata[0]}<extra></extra>")
-            fig.add_hline(y=PER_FEATURE_FLAG, line_dash="dash", line_color=ALERT,
-                          annotation_text=f"single-element limit ({PER_FEATURE_FLAG} sigma)")
-            fig.update_layout(yaxis_title="Deviation from reference (absolute sigma)")
-            st.plotly_chart(theme.base_layout(fig, 340), width="stretch")
-            st.caption("Distance from the reference profile in either direction counts the same. "
-                       "Material that is unusually low in arsenic is as odd as material that is unusually high.")
+            with st.expander("Technical detail (sigma distance, per element)"):
+                z_df = pd.DataFrame({
+                    "Feature": [FEATURE_LABELS[f] for f in FEATURES],
+                    "Deviation": [abs(z[f]) for f in FEATURES],
+                    "Direction": ["above reference" if z[f] >= 0 else "below reference" for f in FEATURES],
+                })
+                fig = px.bar(z_df, x="Feature", y="Deviation", color="Deviation", custom_data=["Direction"],
+                             color_continuous_scale=[MOSS_FILL, OCHRE_FILL, ALERT])
+                fig.update_traces(hovertemplate="%{x}<br/>%{y:.2f} sigma %{customdata[0]}<extra></extra>")
+                fig.add_hline(y=PER_FEATURE_FLAG, line_dash="dash", line_color=ALERT)
+                fig.update_layout(yaxis_title="Deviation from reference (sigma)")
+                st.plotly_chart(theme.base_layout(fig, 300), width="stretch")
+                st.caption(f"Raw score {score:.2f}, review line {FLAG_THRESHOLD}.")
 
             scan_batch(batch_id, sample, source)
 
-# ---------------------------------------------------------------------------
+
 # OFFICER REVIEW QUEUE
-# ---------------------------------------------------------------------------
+
 
 elif page == "Officer review queue":
     theme.page_header("Human in the loop", "Officer review queue", "review")
-    st.caption("The site controller's leverage was fear and speed. This queue is the opposite: "
-               "a named person looks at the numbers, records why, and the member can dispute it.")
+    st.caption("A named person looks at the numbers, records why, and the member can dispute it.")
 
     queue = batches[batches["status"].isin(["Officer Review", "Disputed"])] if len(batches) else batches
     if not len(queue):
-        st.success("Nothing waiting. Every scanned haul has cleared or been resolved.")
+        st.success("Nothing waiting.")
     else:
         for _, b in queue.iterrows():
             with st.container(border=True):
                 c1, c2 = st.columns([2, 1])
                 with c1:
+                    pct = match_percent(b["anomaly_score"]) if pd.notna(b["anomaly_score"]) else None
+                    pct_note = f"{pct}% match" if pct is not None else "match pending"
                     st.markdown(
                         f"**{b['batch_id']}** &nbsp; {b['dump_name']} &nbsp; {b['tonnes']} t &nbsp; "
                         f"{status_tag(b['status'])} &nbsp; "
                         f"<span style='font-family:IBM Plex Mono,monospace;color:{INK_SOFT};font-size:0.8rem;'>"
-                        f"score {b['anomaly_score']} of {FLAG_THRESHOLD}</span>",
+                        f"{pct_note}</span>",
                         unsafe_allow_html=True)
-                    st.caption(f"Logged by {b['member_name']} | {b['section']} | "
-                               f"worked {b['extracted_from']} to {b['extracted_to']}")
+                    st.caption(f"Logged by {b['member_name']} | {b['section']}")
                     if b["officer_note"]:
                         st.warning(b["officer_note"])
                     comparison = pd.DataFrame({
                         "Feature": [FEATURE_LABELS[f] for f in FEATURES],
                         "Measured": [round(float(b[f]), 3) if pd.notna(b[f]) else None for f in FEATURES],
                         "Reference": [st.session_state.dump_profiles[b["dump_name"]][f]["mean"] for f in FEATURES],
-                        "Sigma out": [
-                            round(abs(float(b[f]) - st.session_state.dump_profiles[b["dump_name"]][f]["mean"])
-                                  / st.session_state.dump_profiles[b["dump_name"]][f]["std"], 2)
-                            if pd.notna(b[f]) else None for f in FEATURES
-                        ],
                     })
-                    st.dataframe(comparison, width="stretch", hide_index=True)
+                    with st.expander("Compare measured vs reference"):
+                        st.dataframe(comparison, width="stretch", hide_index=True)
                     note = st.text_input("Officer note", key=f"note_{b['batch_id']}",
                                          placeholder="What did you check, and what did you find?")
                     reason = st.selectbox("If rejecting, why", REJECT_REASONS, key=f"reason_{b['batch_id']}")
@@ -879,23 +840,18 @@ elif page == "Officer review queue":
                         update_batch(b["batch_id"], status="Rejected", reject_reason=reason,
                                      officer_note=note or "Rejected after manual review.")
                         st.rerun()
-                    st.caption("Rejection is recorded against a reason code and is visible to the member "
-                               "on their receipt.")
 
-# ---------------------------------------------------------------------------
 # 04 ERGO VERIFICATION AND SALE
-# ---------------------------------------------------------------------------
+
 
 elif page == "04 Ergo verification and sale":
     theme.page_header("Stage 04 / Sell", "Ergo verification and sale", "ergo")
     theme.process_ribbon("04")
-    st.caption("Ergo takes its own sample on arrival and tests it against the same reference profile. "
-               "It is a genuinely independent check, so it catches material swapped between the "
-               "collection point and the plant gate. Payment follows the same day.")
+    st.caption("Ergo re-tests independently on arrival. Payment follows the same day.")
 
     ready = batches[batches["status"] == "Gold Pass Issued"] if len(batches) else batches
     if not len(ready):
-        st.info("Nothing waiting for Ergo. Clear a haul at the collection point first.")
+        st.info("Nothing waiting for Ergo.")
     else:
         for _, b in ready.iterrows():
             with st.container(border=True):
@@ -903,7 +859,7 @@ elif page == "04 Ergo verification and sale":
                 with c1:
                     st.markdown(f"**{b['batch_id']}** &nbsp; {b['dump_name']} &nbsp; {b['tonnes']} t &nbsp; "
                                 f"{status_tag(b['status'])}", unsafe_allow_html=True)
-                    st.caption(f"Logged by {b['member_name']} | scanned {b['scanned_at']}")
+                    st.caption(f"Logged by {b['member_name']}")
                     breakdown = pd.DataFrame([
                         ["Contained gold", f"{b['contained_g']:.3f} g"],
                         [f"Recovered at {RECOVERY_RATE:.0%}", f"{b['recovered_g']:.3f} g"],
@@ -916,22 +872,18 @@ elif page == "04 Ergo verification and sale":
                 with c2:
                     st.write("")
                     if st.button("Take arrival sample and pay", key=f"ergo_{b['batch_id']}"):
-                        # Fresh draw from whatever the material ACTUALLY is, scored against
-                        # the declared dump. The old version compared the retest to the first
-                        # reading, which meant it could never catch a swap.
                         retest = draw_sample(b["true_source"] or b["dump_name"])
                         score, _ = anomaly_score(b["dump_name"], retest)
                         if score <= FLAG_THRESHOLD:
                             update_batch(b["batch_id"], status="Verified and Sold",
-                                         ergo_check=f"Independent arrival sample consistent (score {score:.2f})",
+                                         ergo_check=f"Independent arrival sample consistent ({match_percent(score)}% match)",
                                          sold_at=datetime.now().strftime("%Y-%m-%d %H:%M"))
-                            st.success(f"Confirmed independently. {money(b['member_zar'])} sent to "
-                                       f"{b['member_name']} today, {money(b['levy_zar'])} to the cooperative fund.")
+                            st.success(f"Confirmed. {money(b['member_zar'])} sent to "
+                                       f"{b['member_name']} today.")
                         else:
                             update_batch(b["batch_id"], status="Officer Review",
-                                         ergo_check=f"Arrival sample inconsistent (score {score:.2f})",
-                                         officer_note="Ergo's arrival sample does not match the reference "
-                                                      "profile. Check custody between collection and plant.")
+                                         ergo_check=f"Arrival sample inconsistent ({match_percent(score)}% match)",
+                                         officer_note="Ergo's arrival sample does not match. Check custody.")
                             st.error("Arrival sample does not match. Sent back to officer review.")
                         st.rerun()
 
@@ -940,22 +892,19 @@ elif page == "04 Ergo verification and sale":
     if len(sold):
         view = sold.sort_values("sold_at", ascending=False)[
             ["batch_id", "dump_name", "member_name", "tonnes", "recovered_g",
-             "member_zar", "ergo_check", "sold_at"]].copy()
-        view.columns = ["Batch", "Dump", "Member", "Tonnes", "Gold (g)", "Paid to member (ZAR)", "Arrival check", "Sold"]
+             "member_zar", "sold_at"]].copy()
+        view.columns = ["Batch", "Dump", "Member", "Tonnes", "Gold (g)", "Paid to member (ZAR)", "Sold"]
         st.dataframe(view, width="stretch", hide_index=True)
     else:
         st.caption("Nothing sold yet.")
 
-# ---------------------------------------------------------------------------
+
 # MEMBER RECEIPT
-# ---------------------------------------------------------------------------
+
 
 elif page == auth.RECEIPT_PAGE:
     theme.page_header("Staff view", "Print a worker receipt", "receipt")
-    st.caption("This is the staff-side view of what gets printed at the collection point and handed "
-               "over, then sent by SMS so it survives a lost phone. It is not a login, and the "
-               "worker never sees this screen. Trust runs both ways: the paper in their hand is "
-               "what makes the record theirs as well as ours.")
+    st.caption("What gets printed and sent by SMS. Not a login; the worker never sees this screen.")
 
     if not len(members):
         st.warning("No members yet.")
@@ -985,7 +934,6 @@ elif page == auth.RECEIPT_PAGE:
                 f"Batch         {latest['batch_id']}\n"
                 f"Member        {member['name']} ({member['member_id']})\n"
                 f"Block         {latest['section']}\n"
-                f"Worked        {latest['extracted_from']} to {latest['extracted_to']}\n"
                 f"Delivered     {latest['tonnes']} tonnes\n"
                 f"Status        {latest['status']}{reason}\n"
                 f"Paid to you   {paid}\n"
@@ -993,8 +941,6 @@ elif page == auth.RECEIPT_PAGE:
                 f"Query this batch: dial *134*GOLD# and enter {latest['batch_id'][-6:]}</div>",
                 unsafe_allow_html=True,
             )
-            st.caption("The USSD line matters. It means a member can check a batch from a feature phone "
-                       "with no data, and it means the record is not only in the buyer's hands.")
 
             st.markdown("#### Full history")
             view = mine.sort_values("logged_at", ascending=False)[
@@ -1004,32 +950,20 @@ elif page == auth.RECEIPT_PAGE:
         else:
             st.info(f"{member['name']} has not logged a haul yet.")
 
-# ---------------------------------------------------------------------------
+
 # ANALYTICS
-# ---------------------------------------------------------------------------
+
 
 elif page == "Analytics":
     theme.page_header("Validation", "Analytics", "analytics")
-    st.caption("Whether the system is doing what it claims: catching substitution without "
-               "obstructing honest work.")
+    st.caption("Whether the system catches substitution without obstructing honest work.")
 
     scanned = batches[batches["anomaly_score"].notna()] if len(batches) else batches
     if not len(scanned):
         st.info("No scanned hauls yet.")
     else:
-        with st.expander("How the review threshold is set", expanded=True):
-            st.markdown(
-                f"""
-The score adds up how far six elements sit from the dump's reference profile, then takes the square
-root. For genuine material that quantity follows a chi distribution with six degrees of freedom, which
-averages **{CHI6_MEAN}**. The threshold of **{FLAG_THRESHOLD}** is its 99th percentile, so roughly
-**one honest haul in a hundred** goes to review.
-
-This is the number to have ready. An earlier draft used 2.75, which would have pulled aside
-**27 percent** of honest deliveries. A system that stops one haul in four feels like an accusation
-no matter how the architecture is described.
-"""
-            )
+        st.caption(f"About {EXPECTED_FALSE_FLAG_RATE:.0%} of honest hauls are sent to review by design; "
+                   "the review line is set from the statistics of genuine material, not a guess.")
 
         dump_pick = st.selectbox("Dump", sorted(scanned["dump_name"].unique()))
         feature_pick = st.selectbox("Feature", FEATURES, format_func=lambda f: FEATURE_LABELS[f])
@@ -1040,7 +974,7 @@ no matter how the architecture is described.
 
         fig = go.Figure()
         fig.add_hrect(y0=mean - 2 * std, y1=mean + 2 * std, fillcolor=MOSS_FILL, opacity=0.15, line_width=0,
-                      annotation_text="expected band (2 sigma)", annotation_position="top left")
+                      annotation_text="expected range", annotation_position="top left")
         fig.add_hline(y=mean, line_dash="dot", line_color=OCHRE_FILL)
         fig.add_trace(go.Scatter(
             x=sub["scanned_at"], y=sub[feature_pick], mode="markers",
@@ -1050,7 +984,7 @@ no matter how the architecture is described.
             hoverinfo="text+y",
         ))
         fig.update_layout(yaxis_title=FEATURE_LABELS[feature_pick], xaxis_title="Scanned")
-        st.plotly_chart(theme.base_layout(fig, 420), width="stretch")
+        st.plotly_chart(theme.base_layout(fig, 380), width="stretch")
 
         left, right = st.columns(2)
         with left:
@@ -1059,25 +993,23 @@ no matter how the architecture is described.
             counts.columns = ["Status", "Hauls"]
             fig2 = px.bar(counts, x="Status", y="Hauls", color="Status", color_discrete_map=STATUS_COLORS)
             fig2.update_layout(showlegend=False)
-            st.plotly_chart(theme.base_layout(fig2, 320), width="stretch")
+            st.plotly_chart(theme.base_layout(fig2, 300), width="stretch")
         with right:
-            st.markdown("### Score against the review line")
-            trend = scanned.sort_values("scanned_at")
-            fig3 = px.scatter(trend, x="scanned_at", y="anomaly_score", color="dump_name",
+            st.markdown("### Match rate over time")
+            trend = scanned.sort_values("scanned_at").copy()
+            trend["match_pct"] = trend["anomaly_score"].apply(match_percent)
+            fig3 = px.scatter(trend, x="scanned_at", y="match_pct", color="dump_name",
                               color_discrete_sequence=[RUST, OCHRE_FILL, MOSS_FILL, WATER_FILL, INK_SOFT, ALERT])
-            fig3.add_hline(y=FLAG_THRESHOLD, line_dash="dash", line_color=ALERT,
-                           annotation_text="review threshold")
-            fig3.add_hline(y=CHI6_MEAN, line_dash="dot", line_color=INK_SOFT,
-                           annotation_text="typical genuine haul")
-            st.plotly_chart(theme.base_layout(fig3, 320), width="stretch")
+            fig3.update_layout(yaxis_title="Match %", yaxis_range=[0, 100])
+            st.plotly_chart(theme.base_layout(fig3, 300), width="stretch")
 
-# ---------------------------------------------------------------------------
+
 # LEDGER
-# ---------------------------------------------------------------------------
+
 
 elif page == "Ledger":
     theme.page_header("Record of account", "Cooperative ledger", "ledger")
-    st.caption("Every haul, who logged it, what the scan found, who decided what, and what was paid.")
+    st.caption("Every haul, decision, and payout.")
 
     if not len(batches):
         st.info("No hauls recorded yet.")
@@ -1107,29 +1039,19 @@ elif page == "Ledger":
         st.download_button("Download ledger as CSV",
                            view.to_csv(index=False).encode("utf-8"),
                            "mineral_gleaning_ledger.csv", "text/csv")
-        st.caption("This CSV is the chain of custody record an OECD due diligence review would ask for: "
-                   "date, place, quantity, participants, and the basis of each decision.")
 
 # ---------------------------------------------------------------------------
 # REGISTER A WORKER
 # ---------------------------------------------------------------------------
-# A worker is registered IN PERSON by a field officer, whose own name is
-# recorded against the registration. That face-to-face check is the social
-# verification layer. Nothing on this page creates an account, sets a password,
-# or gives the person any way to sign in, because they never do.
 
 elif page == auth.WORKER_PAGE:
     theme.page_header("Stage 00 / Enrol", "Register a worker", "members")
-    st.caption("Registration happens face to face, at the dump. The officer who does it puts their "
-               "own name against the record. That in-person check is the social verification layer, "
-               "and it is the reason a haul can be tied to a real person later.")
+    st.caption("Registration happens face to face. The officer's own name is recorded against it.")
 
-    st.info("Workers on the dumps do not sign in and have no password. They are recorded here by "
-            "staff, and "
-            "what they carry away is a printed receipt, an SMS, and the USSD line for checking a batch.")
+    st.info("Workers do not sign in. They carry a printed receipt, an SMS, and a USSD line.")
 
     if not len(dumps):
-        st.warning("Register a dump first. A worker joins a cooperative at a permitted dump.")
+        st.warning("Register a dump first.")
     else:
         with st.form("register_worker_form"):
             c1, c2 = st.columns(2)
@@ -1142,17 +1064,12 @@ elif page == auth.WORKER_PAGE:
                 rw_id = st.text_input("ID or reference number",
                                       placeholder="SA ID, passport, or cooperative reference")
                 rw_gender = st.selectbox("Gender", ["F", "M", "Other or prefer not to say"])
-                st.text_input("Verified in person by", value=user["name"], disabled=True,
-                              help="Recorded automatically from your signed-in account.")
-            st.caption("By submitting, you confirm you met this person, checked the reference "
-                       "number against their document, and explained how the receipt and USSD "
-                       "line work.")
+                st.text_input("Verified in person by", value=user["name"], disabled=True)
             if st.form_submit_button("Register this worker", type="primary"):
                 if not rw_name.strip():
                     st.error("Enter the worker's full name.")
                 elif not rw_id.strip():
-                    st.error("Enter an ID or reference number. The in-person check is the "
-                             "verification layer, so it has to be recorded.")
+                    st.error("Enter an ID or reference number.")
                 else:
                     add_member(rw_name.strip(), rw_dump, rw_role, rw_gender,
                                id_ref=rw_id.strip(),
@@ -1167,22 +1084,10 @@ elif page == auth.WORKER_PAGE:
         view.columns = ["Worker ID", "Name", "Dump", "Role", "ID or reference", "Registered"]
         st.dataframe(view, width="stretch", hide_index=True)
     else:
-        st.caption("Nothing yet. Workers you register will appear here.")
+        st.caption("Nothing yet.")
 
 elif page == auth.ACCOUNTS_PAGE:
     auth.render_accounts_page(user)
 
 theme.site_footer()
 
-# ---------------------------------------------------------------------------
-# NOTES FOR THE TEAM
-# ---------------------------------------------------------------------------
-# 1. LEADERSHIP_TARGET is set to 30% and attributed to nobody. The first version of this app
-#    credited it to the African Mining Vision. Confirm that before it goes in front of the World
-#    Gold Council. South Africa's Mining Charter is the likelier source for a hard number.
-# 2. "AI anomaly scan" in the deck describes what is implemented here as a statistical comparison
-#    against a geochemical reference profile. "Geochemical fingerprint check" is more accurate and
-#    much easier to defend under questioning.
-# 3. Session state resets on refresh. Fine for a demo. Say so if a judge asks about persistence.
-# 4. Uranium is in the feature set because Witwatersrand tailings are uraniferous. That is a real
-#    credibility hook and also a real health question the solution should have an answer for.
