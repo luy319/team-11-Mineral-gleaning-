@@ -1,18 +1,4 @@
-"""
-Palette, stylesheet and illustration engine, shared by the public landing page
-and the signed-in portal.
 
-Every image in this project is drawn here, in code, as inline SVG. Nothing is
-fetched over the network and nothing is read off disk, so the app renders
-identically on a venue projector with no wifi and there is no image licence to
-explain to anybody. The scenes mix from the palette constants below, which is
-the reason they sit on the sand background instead of looking pasted onto it.
-
-The subject matter is deliberate: aerial tailings dumps, terraces, haul roads,
-a headgear on the horizon. Landscape and plant, never people. A project about
-dignity in artisanal mining should not use a photograph of a miner as wallpaper,
-so workers and staff appear as generated initials rather than stock faces.
-"""
 
 import hashlib
 import itertools
@@ -39,6 +25,21 @@ WATER = "#3D6459"     # tailings pond teal, verified and sold
 WATER_FILL = "#4C7A6E"
 ALERT = "#86372A"     # deep rust red, reject
 LINE = "#B9A97E"      # dividers and borders
+
+.
+DEFAULT_PHOTO_URL = (
+    "https://assets.science.nasa.gov/content/dam/science/esd/eo/images/"
+    "imagerecords/150000/150423/ISS067-E-170382_lrg.jpg"
+)
+PHOTO_CREDIT = "Photo: NASA Earth Observatory (public domain)"
+
+# A dump can optionally get its own photo by adding its name here, mapped to
+# (url, credit) — any HTTPS image URL that meets the same licensing bar as
+# above. Any dump not listed keeps its illustrated aerial contour, which is
+# not a fallback or a compromise, it is simply the honest option when no real
+# photo of that specific site exists.
+# Example: "Brakpan Central": ("https://.../photo.jpg", "Photo: NASA Earth Observatory")
+DUMP_PHOTOS = {}
 
 
 def inject_css():
@@ -201,6 +202,18 @@ def inject_css():
         height: 76%;
         width: auto;
         pointer-events: none;
+    }}
+    .scene-credit {{
+        position: absolute;
+        right: 10px;
+        bottom: 8px;
+        font-family: 'IBM Plex Mono', monospace;
+        font-size: 0.6rem;
+        letter-spacing: 0.03em;
+        color: {BG};
+        opacity: 0.75;
+        text-shadow: 0 1px 3px rgba(0,0,0,0.6);
+        z-index: 2;
     }}
 
     .card-grid {{
@@ -930,11 +943,19 @@ def process_ribbon(active=None):
     st.markdown(f'<div class="ribbon">{body}</div>', unsafe_allow_html=True)
 
 
-def hero_band(eyebrow, title, lede):
+def hero_band(eyebrow, title, lede, photo_url=DEFAULT_PHOTO_URL, credit=PHOTO_CREDIT):
+    bg_style = (
+        f'style="background-image:url(\'{photo_url}\');'
+        f'background-size:cover;background-position:center;"'
+        if photo_url else ""
+    )
+    scene = "" if photo_url else hero_svg()
+    credit_html = f'<div class="scene-credit">{credit}</div>' if (photo_url and credit) else ""
     st.markdown("".join([
-        '<div class="scene-wrap hero">',
-        hero_svg(),
+        f'<div class="scene-wrap hero" {bg_style}>',
+        scene,
         '<div class="scene-scrim"></div>',
+        credit_html,
         '<div class="scene-copy">',
         f'<div class="eyebrow">{eyebrow}</div>',
         f'<h1 class="scene-title">{title}</h1>',
@@ -943,12 +964,20 @@ def hero_band(eyebrow, title, lede):
     ]), unsafe_allow_html=True)
 
 
-def page_header(eyebrow, title, motif):
+def page_header(eyebrow, title, motif, photo_url=DEFAULT_PHOTO_URL, credit=PHOTO_CREDIT):
+    bg_style = (
+        f'style="background-image:url(\'{photo_url}\');'
+        f'background-size:cover;background-position:center;"'
+        if photo_url else ""
+    )
+    scene = "" if photo_url else strip_svg()
+    credit_html = f'<div class="scene-credit">{credit}</div>' if (photo_url and credit) else ""
     st.markdown("".join([
-        '<div class="scene-wrap pagehead">',
-        strip_svg(),
+        f'<div class="scene-wrap pagehead" {bg_style}>',
+        scene,
         '<div class="scene-scrim"></div>',
         motif_svg(motif),
+        credit_html,
         '<div class="scene-copy">',
         f'<div class="eyebrow">{eyebrow}</div>',
         f'<h1 class="scene-title">{title}</h1>',
@@ -958,14 +987,25 @@ def page_header(eyebrow, title, motif):
 
 def dump_cards(rows):
     """rows: dicts of dump_name, permit_no, hauls, tonnes, permit_ok, permit_note.
-    The caller resolves permit status, so this module stays free of portal logic."""
+    The caller resolves permit status, so this module stays free of portal logic.
+    A dump listed in DUMP_PHOTOS gets that real photo; everything else keeps
+    its illustrated aerial contour."""
     cards = []
     for d in rows:
         ok, note = d["permit_ok"], d["permit_note"]
         hauls, tonnes = d["hauls"], d["tonnes"]
+        entry = DUMP_PHOTOS.get(d["dump_name"])
+        if entry:
+            url, _credit = entry
+            thumb = (
+                f'<div class="thumb" style="background-image:url(\'{url}\');'
+                f'background-size:cover;background-position:center;"></div>'
+            )
+        else:
+            thumb = f'<div class="thumb">{dump_thumb_svg(d["dump_name"])}</div>'
         cards.append("".join([
             '<div class="site-card">',
-            f'<div class="thumb">{dump_thumb_svg(d["dump_name"])}</div>',
+            thumb,
             '<div class="body">',
             f'<div class="name">{d["dump_name"]}</div>',
             f'<div class="meta">{d["permit_no"]} &middot; {hauls} haul(s) &middot; {tonnes:,.1f} t</div>',
