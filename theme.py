@@ -26,7 +26,7 @@ WATER_FILL = "#4C7A6E"
 ALERT = "#86372A"     # deep rust red, reject
 LINE = "#B9A97E"      # dividers and borders
 
-.
+
 DEFAULT_PHOTO_URL = (
     "https://assets.science.nasa.gov/content/dam/science/esd/eo/images/"
     "imagerecords/150000/150423/ISS067-E-170382_lrg.jpg"
